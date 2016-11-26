@@ -7,11 +7,13 @@
 #include "include/int_types.h"
 #include "include/rados/librados.hpp"
 #include "include/Context.h"
+#include "common/AsyncOpTracker.h"
 #include "common/Mutex.h"
-#include "journal/AsyncOpTracker.h"
 #include "journal/JournalMetadata.h"
 #include "cls/journal/cls_journal_types.h"
 #include <functional>
+
+struct Context;
 
 namespace journal {
 
@@ -23,13 +25,15 @@ public:
                  const JournalMetadataPtr &journal_metadata);
   ~JournalTrimmer();
 
-  int remove_objects(bool force);
+  void shut_down(Context *on_finish);
+
+  void remove_objects(bool force, Context *on_finish);
   void committed(uint64_t commit_tid);
 
 private:
   typedef std::function<Context*()> CreateContext;
 
-  struct MetadataListener : public JournalMetadata::Listener {
+  struct MetadataListener : public JournalMetadataListener {
     JournalTrimmer *journal_trimmmer;
 
     MetadataListener(JournalTrimmer *journal_trimmmer)
@@ -54,21 +58,8 @@ private:
     virtual void finish(int r) {
     }
   };
-  struct C_RemoveSet : public Context {
-    JournalTrimmer *journal_trimmer;
-    uint64_t object_set;
-    Mutex lock;
-    uint32_t refs;
-    int return_value;
 
-    C_RemoveSet(JournalTrimmer *_journal_trimmer, uint64_t _object_set,
-                uint8_t _splay_width);
-    virtual void complete(int r);
-    virtual void finish(int r) {
-      journal_trimmer->handle_set_removed(r, object_set);
-      journal_trimmer->m_async_op_tracker.finish_op();
-    }
-  };
+  struct C_RemoveSet;
 
   librados::IoCtx m_ioctx;
   CephContext *m_cct;
@@ -84,6 +75,8 @@ private:
   bool m_remove_set_pending;
   uint64_t m_remove_set;
   Context *m_remove_set_ctx;
+
+  bool m_shutdown = false;
 
   CreateContext m_create_commit_position_safe_context = [this]() {
       return new C_CommitPositionSafe(this);

@@ -2,6 +2,7 @@
 // vim: ts=8 sw=2 smarttab
 
 #include "journal/Journaler.h"
+#include "journal/Settings.h"
 #include "include/stringify.h"
 #include "gtest/gtest.h"
 #include "test/librados/test.h"
@@ -21,7 +22,7 @@ public:
     RadosTestFixture::SetUp();
     m_journal_id = get_temp_journal_id();
     m_journaler = new journal::Journaler(m_work_queue, m_timer, &m_timer_lock,
-                                         m_ioctx, m_journal_id, CLIENT_ID, 5);
+                                         m_ioctx, m_journal_id, CLIENT_ID, {});
   }
 
   virtual void TearDown() {
@@ -30,7 +31,9 @@ public:
   }
 
   int create_journal(uint8_t order, uint8_t splay_width) {
-    return m_journaler->create(order, splay_width, -1);
+    C_SaferCond cond;
+    m_journaler->create(order, splay_width, -1, &cond);
+    return cond.wait();
   }
 
   int init_journaler() {
@@ -39,9 +42,15 @@ public:
     return cond.wait();
   }
 
+  int shut_down_journaler() {
+    C_SaferCond ctx;
+    m_journaler->shut_down(&ctx);
+    return ctx.wait();
+  }
+
   int register_client(const std::string &client_id, const std::string &desc) {
     journal::Journaler journaler(m_work_queue, m_timer, &m_timer_lock,
-                                 m_ioctx, m_journal_id, client_id, 5);
+                                 m_ioctx, m_journal_id, client_id, {});
     bufferlist data;
     data.append(desc);
     C_SaferCond cond;
@@ -51,7 +60,7 @@ public:
 
   int update_client(const std::string &client_id, const std::string &desc) {
     journal::Journaler journaler(m_work_queue, m_timer, &m_timer_lock,
-                                 m_ioctx, m_journal_id, client_id, 5);
+                                 m_ioctx, m_journal_id, client_id, {});
     bufferlist data;
     data.append(desc);
     C_SaferCond cond;
@@ -61,7 +70,7 @@ public:
 
   int unregister_client(const std::string &client_id) {
     journal::Journaler journaler(m_work_queue, m_timer, &m_timer_lock,
-                                 m_ioctx, m_journal_id, client_id, 5);
+                                 m_ioctx, m_journal_id, client_id, {});
     C_SaferCond cond;
     journaler.unregister_client(&cond);
     return cond.wait();
@@ -95,10 +104,12 @@ TEST_F(TestJournaler, Init) {
   ASSERT_EQ(0, create_journal(12, 8));
   ASSERT_EQ(0, register_client(CLIENT_ID, "foo"));
   ASSERT_EQ(0, init_journaler());
+  ASSERT_EQ(0, shut_down_journaler());
 }
 
 TEST_F(TestJournaler, InitDNE) {
   ASSERT_EQ(-ENOENT, init_journaler());
+  ASSERT_EQ(0, shut_down_journaler());
 }
 
 TEST_F(TestJournaler, RegisterClientDuplicate) {

@@ -19,9 +19,11 @@
 
 #include "include/types.h"
 #include "include/buffer_fwd.h"
-#include "mdstypes.h"
+#include "common/bloom_filter.hpp"
 #include "common/config.h"
 #include "common/DecayCounter.h"
+
+#include "MDSCacheObject.h"
 
 #include <iosfwd>
 
@@ -35,13 +37,13 @@
 
 class CDentry;
 class MDCache;
-class MDCluster;
-class bloom_filter;
 
 struct ObjectOperation;
 
 ostream& operator<<(ostream& out, const class CDir& dir);
 class CDir : public MDSCacheObject {
+  friend ostream& operator<<(ostream& out, const class CDir& dir);
+
   /*
    * This class uses a boost::pool to handle allocation. This is *not*
    * thread-safe, so don't do allocations from multiple threads!
@@ -337,7 +339,7 @@ private:
 
 
 protected:
-  scrub_info_t *scrub_infop;
+  std::unique_ptr<scrub_info_t> scrub_infop;
 
   // contents of this directory
   map_t items;       // non-null AND null
@@ -394,15 +396,13 @@ protected:
   friend class C_IO_Dir_OMAP_Fetched;
   friend class C_IO_Dir_Committed;
 
-  bloom_filter *bloom;
+  std::unique_ptr<bloom_filter> bloom;
   /* If you set up the bloom filter, you must keep it accurate!
    * It's deleted when you mark_complete() and is deliberately not serialized.*/
 
  public:
   CDir(CInode *in, frag_t fg, MDCache *mdcache, bool auth);
   ~CDir() {
-    delete scrub_infop;
-    remove_bloom();
     g_num_dir--;
     g_num_dirs++;
   }
@@ -411,7 +411,7 @@ protected:
     if (!scrub_infop) {
       scrub_info_create();
     }
-    return scrub_infop;
+    return scrub_infop.get();
   }
 
 
@@ -448,16 +448,11 @@ protected:
 
   // -- dentries and inodes --
  public:
-  CDentry* lookup_exact_snap(const std::string& dname, snapid_t last) {
-    map_t::iterator p = items.find(dentry_key_t(last, dname.c_str()));
-    if (p == items.end())
-      return NULL;
-    return p->second;
+  CDentry* lookup_exact_snap(const std::string& dname, snapid_t last);
+  CDentry* lookup(const std::string& n, snapid_t snap=CEPH_NOSNAP);
+  CDentry* lookup(const char *n, snapid_t snap=CEPH_NOSNAP) {
+    return lookup(std::string(n), snap);
   }
-  CDentry* lookup(const std::string& n, snapid_t snap=CEPH_NOSNAP) {
-    return lookup(n.c_str(), snap);
-  }
-  CDentry* lookup(const char *n, snapid_t snap=CEPH_NOSNAP);
 
   CDentry* add_null_dentry(const std::string& dname, 
 			   snapid_t first=2, snapid_t last=CEPH_NOSNAP);
@@ -475,7 +470,9 @@ protected:
   void add_to_bloom(CDentry *dn);
   bool is_in_bloom(const std::string& name);
   bool has_bloom() { return (bloom ? true : false); }
-  void remove_bloom();
+  void remove_bloom() {
+    bloom.reset();
+  }
 private:
   void link_inode_work( CDentry *dn, CInode *in );
   void unlink_inode_work( CDentry *dn );
@@ -514,6 +511,8 @@ private:
    *             <parent,mds2>       subtree_root     
    */
   mds_authority_t dir_auth;
+
+  std::string get_path() const;
 
  public:
   mds_authority_t authority() const;
@@ -638,8 +637,6 @@ protected:
 
   void _omap_fetched(bufferlist& hdrbl, std::map<std::string, bufferlist>& omap,
 		     bool complete, int r);
-  void _tmap_fetch();
-  void _tmap_fetched(bufferlist &bl, int r);
 
   // -- commit --
   compact_map<version_t, std::list<MDSInternalContextBase*> > waiting_for_commit;

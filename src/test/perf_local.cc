@@ -184,7 +184,7 @@ double buffer_basic()
 }
 
 struct DummyBlock {
-  int a, b, c, d;
+  int a = 1, b = 2, c = 3, d = 4;
   void encode(bufferlist &bl) const {
     ENCODE_START(1, 1, bl);
     ::encode(a, bl);
@@ -450,7 +450,7 @@ double eventcenter_poll()
 {
   int count = 1000000;
   EventCenter center(g_ceph_context);
-  center.init(1000);
+  center.init(1000, 0);
   center.set_owner();
   uint64_t start = Cycles::rdtsc();
   for (int i = 0; i < count; i++) {
@@ -467,7 +467,7 @@ class CenterWorker : public Thread {
  public:
   EventCenter center;
   explicit CenterWorker(CephContext *c): cct(c), done(false), center(c) {
-    center.init(100);
+    center.init(100, 0);
   }
   void stop() {
     done = true;
@@ -1018,7 +1018,8 @@ int main(int argc, char *argv[])
   vector<const char*> args;
   argv_to_vec(argc, (const char **)argv, args);
 
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, 0);
+  auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
+			 CODE_ENVIRONMENT_UTILITY, 0);
   common_init_finish(g_ceph_context);
   Cycles::init();
 

@@ -22,7 +22,7 @@
 #undef dout_prefix
 #define dout_prefix *_dout << "EpollDriver."
 
-int EpollDriver::init(int nevent)
+int EpollDriver::init(EventCenter *c, int nevent)
 {
   events = (struct epoll_event*)malloc(sizeof(struct epoll_event)*nevent);
   if (!events) {
@@ -123,8 +123,8 @@ int EpollDriver::event_wait(vector<FiredFileEvent> &fired_events, struct timeval
 
       if (e->events & EPOLLIN) mask |= EVENT_READABLE;
       if (e->events & EPOLLOUT) mask |= EVENT_WRITABLE;
-      if (e->events & EPOLLERR) mask |= EVENT_WRITABLE;
-      if (e->events & EPOLLHUP) mask |= EVENT_WRITABLE;
+      if (e->events & EPOLLERR) mask |= EVENT_READABLE|EVENT_WRITABLE;
+      if (e->events & EPOLLHUP) mask |= EVENT_READABLE|EVENT_WRITABLE;
       fired_events[j].fd = e->data.fd;
       fired_events[j].mask = mask;
     }

@@ -9,8 +9,6 @@
 #include "include/rados/librados.hpp"
 #include "include/stringify.h"
 #include "global/global_context.h"
-#include "global/global_init.h"
-#include "common/ceph_argparse.h"
 #include "common/common_init.h"
 #include "test/librados/test.h"
 #include "test/librados/TestCase.h"
@@ -19,6 +17,8 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include "test/unit.h"
+
 
 using namespace librados;
 using std::map;
@@ -454,6 +454,24 @@ TEST_F(LibRadosMiscPP, ExecPP) {
   ASSERT_NE(all_features, (unsigned)0);
 }
 
+void set_completion_complete(rados_completion_t cb, void *arg)
+{
+  bool *my_aio_complete = (bool*)arg;
+  *my_aio_complete = true;
+}
+
+TEST_F(LibRadosMiscPP, BadFlagsPP) {
+  unsigned badflags = CEPH_OSD_FLAG_PARALLELEXEC;
+  {
+    bufferlist bl;
+    bl.append("data");
+    ASSERT_EQ(0, ioctx.write("badfoo", bl, bl.length(), 0));
+  }
+  {
+    ASSERT_EQ(-EINVAL, ioctx.remove("badfoo", badflags));
+  }
+}
+
 TEST_F(LibRadosMiscPP, Operate1PP) {
   ObjectWriteOperation o;
   {
@@ -545,12 +563,6 @@ TEST_F(LibRadosMiscPP, BigObjectPP) {
   // this test only works on 64-bit platforms
   ASSERT_EQ(-EFBIG, ioctx.write("foo", bl, bl.length(), 500000000000ull));
 #endif
-}
-
-void set_completion_complete(rados_completion_t cb, void *arg)
-{
-  bool *my_aio_complete = (bool*)arg;
-  *my_aio_complete = true;
 }
 
 TEST_F(LibRadosMiscPP, AioOperatePP) {
@@ -1002,17 +1014,4 @@ TEST_F(LibRadosMisc, WriteSame) {
 	    rados_writesame(ioctx, "ws", buf, 0, sizeof(buf), 0));
   /* write_len = data_len, i.e. same as rados_write() */
   ASSERT_EQ(0, rados_writesame(ioctx, "ws", buf, sizeof(buf), sizeof(buf), 0));
-}
-
-int main(int argc, char **argv)
-{
-  ::testing::InitGoogleTest(&argc, argv);
-
-  vector<const char*> args;
-  argv_to_vec(argc, (const char **)argv, args);
-
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, 0);
-  common_init_finish(g_ceph_context);
-
-  return RUN_ALL_TESTS();
 }

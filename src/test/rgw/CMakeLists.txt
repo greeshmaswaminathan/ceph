@@ -1,7 +1,22 @@
+#unittest_rgw_bencode
+add_executable(unittest_rgw_bencode test_rgw_bencode.cc)
+add_ceph_unittest(unittest_rgw_bencode ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_rgw_bencode)
+target_link_libraries(unittest_rgw_bencode rgw_a)
+
 #unitttest_rgw_period_history
-add_executable(unittest_rgw_period_history EXCLUDE_FROM_ALL test_rgw_period_history.cc)
+add_executable(unittest_rgw_period_history test_rgw_period_history.cc)
 add_ceph_unittest(unittest_rgw_period_history ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_rgw_period_history)
 target_link_libraries(unittest_rgw_period_history rgw_a)
+
+# unitttest_rgw_compression
+add_executable(unittest_rgw_compression test_rgw_compression.cc)
+add_ceph_unittest(unittest_rgw_compression ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_rgw_compression)
+target_link_libraries(unittest_rgw_compression rgw_a)
+
+# unitttest_http_manager
+add_executable(unittest_http_manager test_http_manager.cc)
+add_ceph_unittest(unittest_http_manager ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_http_manager)
+target_link_libraries(unittest_http_manager rgw_a)
 
 # ceph_test_rgw_manifest
 set(test_rgw_manifest_srcs test_rgw_manifest.cc)
@@ -18,13 +33,12 @@ target_link_libraries(ceph_test_rgw_manifest
   cls_timeindex_client
   cls_version_client
   cls_replica_log_client
-  cls_kvs
   cls_user_client
   librados
   global
-  curl
-  expat
   ${BLKID_LIBRARIES}
+  ${CURL_LIBRARIES}
+  ${EXPAT_LIBRARIES}
   ${CMAKE_DL_LIBS}
   ${UNITTEST_LIBS}
   ${CRYPTO_LIBS}
@@ -46,17 +60,14 @@ target_link_libraries(ceph_test_rgw_obj
   cls_statelog_client
   cls_version_client
   cls_replica_log_client
-  cls_kvs
   cls_user_client
   librados
   global
-  curl
-  uuid
-  expat
+  ${CURL_LIBRARIES}
+  ${EXPAT_LIBRARIES}
   ${CMAKE_DL_LIBS}
   ${UNITTEST_LIBS}
   ${CRYPTO_LIBS}
   )
 set_target_properties(ceph_test_rgw_obj PROPERTIES COMPILE_FLAGS
   ${UNITTEST_CXX_FLAGS})
-

@@ -63,7 +63,7 @@ public:
 
   // piggybacked osd/og state
   eversion_t pg_trim_to;   // primary->replica: trim to here
-  eversion_t pg_trim_rollback_to;   // primary->replica: trim rollback
+  eversion_t pg_roll_forward_to;   // primary->replica: trim rollback
                                     // info to here
   osd_peer_stat_t peer_stat;
 
@@ -172,9 +172,9 @@ public:
       ::decode(updated_hit_set_history, p);
     }
     if (header.version >= 11) {
-      ::decode(pg_trim_rollback_to, p);
+      ::decode(pg_roll_forward_to, p);
     } else {
-      pg_trim_rollback_to = pg_trim_to;
+      pg_roll_forward_to = pg_trim_to;
     }
   }
 
@@ -224,7 +224,7 @@ public:
     ::encode(complete, payload);
     ::encode(oloc, payload);
     ::encode(data_included, payload);
-    ::encode(recovery_info, payload);
+    ::encode(recovery_info, payload, features);
     ::encode(recovery_progress, payload);
     ::encode(current_progress, payload);
     ::encode(omap_entries, payload);
@@ -234,7 +234,7 @@ public:
     ::encode(from, payload);
     ::encode(pgid.shard, payload);
     ::encode(updated_hit_set_history, payload);
-    ::encode(pg_trim_rollback_to, payload);
+    ::encode(pg_roll_forward_to, payload);
   }
 
   MOSDSubOp()

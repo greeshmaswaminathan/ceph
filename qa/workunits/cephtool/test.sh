@@ -14,9 +14,10 @@ function check_no_osd_down()
 
 function wait_no_osd_down()
 {
-  for i in $(seq 1 300) ; do
+  max_run=300
+  for i in $(seq 1 $max_run) ; do
     if ! check_no_osd_down ; then
-      echo "waiting for osd(s) to come back up"
+      echo "waiting for osd(s) to come back up ($i/$max_run)"
       sleep 1
     else
       break
@@ -31,11 +32,11 @@ function expect_false()
 	if "$@"; then return 1; else return 0; fi
 }
 
-TMPDIR=/tmp/cephtool$$
-mkdir $TMPDIR
-trap "rm -fr $TMPDIR" 0
 
-TMPFILE=$TMPDIR/test_invalid.$$
+TEMP_DIR=$(mktemp -d ${TMPDIR-/tmp}/cephtool.XXX)
+trap "rm -fr $TEMP_DIR" 0
+
+TMPFILE=$(mktemp $TEMP_DIR/test_invalid.XXX)
 
 #
 # retry_eagain max cmd args ...
@@ -48,7 +49,7 @@ function retry_eagain()
     local max=$1
     shift
     local status
-    local tmpfile=$TMPDIR/retry_eagain.$$
+    local tmpfile=$TEMP_DIR/retry_eagain.$$
     local count
     for count in $(seq 1 $max) ; do
         status=0
@@ -76,7 +77,7 @@ function retry_eagain()
 function map_enxio_to_eagain()
 {
     local status=0
-    local tmpfile=$TMPDIR/map_enxio_to_eagain.$$
+    local tmpfile=$TEMP_DIR/map_enxio_to_eagain.$$
 
     "$@" > $tmpfile 2>&1 || status=$?
     if test $status != 0 &&
@@ -148,7 +149,7 @@ function ceph_watch_start()
 	whatch_opt=--watch-$1
     fi
 
-    CEPH_WATCH_FILE=${TMPDIR}/CEPH_WATCH_$$
+    CEPH_WATCH_FILE=${TEMP_DIR}/CEPH_WATCH_$$
     ceph $whatch_opt > $CEPH_WATCH_FILE &
     CEPH_WATCH_PID=$!
 
@@ -196,7 +197,7 @@ function test_mon_injectargs()
   check_response "osd_enable_op_tracker = 'true'"
   ceph tell osd.0 injectargs -- '--osd_enable_op_tracker --osd_op_history_duration 600' >& $TMPFILE || return 1
   check_response "osd_enable_op_tracker = 'true' osd_op_history_duration = '600'"
-  expect_failure $TMPDIR "Option --osd_op_history_duration requires an argument" \
+  expect_failure $TEMP_DIR "Option --osd_op_history_duration requires an argument" \
                  ceph tell osd.0 injectargs -- '--osd_op_history_duration'
 
   ceph tell osd.0 injectargs -- '--mon-lease 6' >& $TMPFILE || return 1
@@ -485,7 +486,7 @@ function test_auth()
   ceph auth print-key client.xx
   ceph auth print_key client.xx
   ceph auth caps client.xx osd "allow rw"
-  expect_false "ceph auth get client.xx | grep caps | grep mon"
+  expect_false sh <<< "ceph auth get client.xx | grep caps | grep mon"
   ceph auth get client.xx | grep osd | grep "allow rw"
   ceph auth export | grep client.xx
   ceph auth export -o authfile
@@ -595,22 +596,22 @@ function test_auth_profiles()
 
 function test_mon_caps()
 {
-  ceph-authtool --create-keyring $TMPDIR/ceph.client.bug.keyring
-  chmod +r  $TMPDIR/ceph.client.bug.keyring
-  ceph-authtool  $TMPDIR/ceph.client.bug.keyring -n client.bug --gen-key
-  ceph auth add client.bug -i  $TMPDIR/ceph.client.bug.keyring
+  ceph-authtool --create-keyring $TEMP_DIR/ceph.client.bug.keyring
+  chmod +r  $TEMP_DIR/ceph.client.bug.keyring
+  ceph-authtool  $TEMP_DIR/ceph.client.bug.keyring -n client.bug --gen-key
+  ceph auth add client.bug -i  $TEMP_DIR/ceph.client.bug.keyring
 
-  rados lspools --keyring $TMPDIR/ceph.client.bug.keyring -n client.bug >& $TMPFILE || true
+  rados lspools --keyring $TEMP_DIR/ceph.client.bug.keyring -n client.bug >& $TMPFILE || true
   check_response "Permission denied"
 
-  rm -rf $TMPDIR/ceph.client.bug.keyring
+  rm -rf $TEMP_DIR/ceph.client.bug.keyring
   ceph auth del client.bug
-  ceph-authtool --create-keyring $TMPDIR/ceph.client.bug.keyring
-  chmod +r  $TMPDIR/ceph.client.bug.keyring
-  ceph-authtool  $TMPDIR/ceph.client.bug.keyring -n client.bug --gen-key
-  ceph-authtool -n client.bug --cap mon '' $TMPDIR/ceph.client.bug.keyring
-  ceph auth add client.bug -i  $TMPDIR/ceph.client.bug.keyring
-  rados lspools --keyring $TMPDIR/ceph.client.bug.keyring -n client.bug >& $TMPFILE || true
+  ceph-authtool --create-keyring $TEMP_DIR/ceph.client.bug.keyring
+  chmod +r  $TEMP_DIR/ceph.client.bug.keyring
+  ceph-authtool  $TEMP_DIR/ceph.client.bug.keyring -n client.bug --gen-key
+  ceph-authtool -n client.bug --cap mon '' $TEMP_DIR/ceph.client.bug.keyring
+  ceph auth add client.bug -i  $TEMP_DIR/ceph.client.bug.keyring
+  rados lspools --keyring $TEMP_DIR/ceph.client.bug.keyring -n client.bug >& $TMPFILE || true
   check_response "Permission denied"  
 }
 
@@ -653,6 +654,7 @@ function test_mon_misc()
   ceph_watch_wait "$mymsg"
 
   ceph mon metadata a
+  ceph mon metadata
   ceph node ls
 }
 
@@ -665,9 +667,10 @@ function check_mds_active()
 function wait_mds_active()
 {
   fs_name=$1
-  for i in $(seq 1 300) ; do
+  max_run=300
+  for i in $(seq 1 $max_run) ; do
       if ! check_mds_active $fs_name ; then
-          echo "waiting for an active MDS daemon"
+          echo "waiting for an active MDS daemon ($i/$max_run)"
           sleep 5
       else
           break
@@ -717,6 +720,19 @@ function mds_exists()
     ceph auth list | grep "^mds"
 }
 
+# some of the commands are just not idempotent.
+function without_test_dup_command()
+{
+  if [ -z ${CEPH_CLI_TEST_DUP_COMMAND+x} ]; then
+    $@
+  else
+    local saved=${CEPH_CLI_TEST_DUP_COMMAND}
+    unset CEPH_CLI_TEST_DUP_COMMAND
+    $@
+    CEPH_CLI_TEST_DUP_COMMAND=saved
+  fi
+}
+
 function test_mds_tell()
 {
   FS_NAME=cephfs
@@ -741,7 +757,7 @@ function test_mds_tell()
   expect_false ceph tell mds.a injectargs mds_max_file_recover -1
 
   # Test respawn by rank
-  ceph tell mds.0 respawn
+  without_test_dup_command ceph tell mds.0 respawn
   new_mds_gids=$old_mds_gids
   while [ $new_mds_gids -eq $old_mds_gids ] ; do
       sleep 5
@@ -750,7 +766,7 @@ function test_mds_tell()
   echo New GIDs: $new_mds_gids
 
   # Test respawn by ID
-  ceph tell mds.a respawn
+  without_test_dup_command ceph tell mds.a respawn
   new_mds_gids=$old_mds_gids
   while [ $new_mds_gids -eq $old_mds_gids ] ; do
       sleep 5
@@ -799,8 +815,10 @@ function test_mon_mds()
   for mds_gid in $(get_mds_gids $FS_NAME) ; do
       ceph mds metadata $mds_id
   done
+  ceph mds metadata
+
   # XXX mds fail, but how do you undo it?
-  mdsmapfile=$TMPDIR/mdsmap.$$
+  mdsmapfile=$TEMP_DIR/mdsmap.$$
   current_epoch=$(ceph mds getmap -o $mdsmapfile --no-log-to-stderr 2>&1 | grep epoch | sed 's/.*epoch //')
   [ -s $mdsmapfile ]
   rm $mdsmapfile
@@ -1017,8 +1035,8 @@ function test_mon_mon()
   ceph --help mon
   # no mon add/remove
   ceph mon dump
-  ceph mon getmap -o $TMPDIR/monmap.$$
-  [ -s $TMPDIR/monmap.$$ ]
+  ceph mon getmap -o $TEMP_DIR/monmap.$$
+  [ -s $TEMP_DIR/monmap.$$ ]
   # ceph mon tell
   ceph mon_status
 }
@@ -1037,14 +1055,14 @@ function test_mon_osd()
   ceph osd dump --format=json-pretty | grep $bl
   ceph osd dump | grep "^blacklist $bl"
   ceph osd blacklist rm $bl
-  expect_false "ceph osd blacklist ls | grep $bl"
+  ceph osd blacklist ls | expect_false grep $bl
 
   bl=192.168.0.1
   # test without nonce, invalid nonce
   ceph osd blacklist add $bl
   ceph osd blacklist ls | grep $bl
   ceph osd blacklist rm $bl
-  expect_false "ceph osd blacklist ls | grep $bl"
+  ceph osd blacklist ls | expect_false grep $expect_false bl
   expect_false "ceph osd blacklist $bl/-1"
   expect_false "ceph osd blacklist $bl/foo"
 
@@ -1055,7 +1073,7 @@ function test_mon_osd()
   ceph osd blacklist add $bl
   ceph osd blacklist ls | grep $bl
   ceph osd blacklist clear
-  expect_false "ceph osd blacklist ls | grep $bl"
+  ceph osd blacklist ls | expect_false grep $bl
 
   #
   # osd crush
@@ -1089,14 +1107,19 @@ function test_mon_osd()
   ceph osd set sortbitwise  # new backends cant handle nibblewise
   expect_false ceph osd set bogus
   expect_false ceph osd unset bogus
+  ceph osd set require_jewel_osds
+  expect_false ceph osd unset require_jewel_osds
+  ceph osd set require_kraken_osds
+  expect_false ceph osd unset require_kraken_osds
 
   ceph osd set noup
   ceph osd down 0
   ceph osd dump | grep 'osd.0 down'
   ceph osd unset noup
-  for ((i=0; i < 1000; i++)); do
+  max_run=1000
+  for ((i=0; i < $max_run; i++)); do
     if ! ceph osd dump | grep 'osd.0 up'; then
-      echo "waiting for osd.0 to come back up"
+      echo "waiting for osd.0 to come back up ($i/$max_run)"
       sleep 1
     else
       break
@@ -1110,19 +1133,28 @@ function test_mon_osd()
   # ceph osd find expects the OsdName, so both ints and osd.n should work.
   ceph osd find 1
   ceph osd find osd.1
-  expect_false osd find osd.xyz
-  expect_false osd find xyz
-  expect_false osd find 0.1
+  expect_false ceph osd find osd.xyz
+  expect_false ceph osd find xyz
+  expect_false ceph osd find 0.1
   ceph --format plain osd find 1 # falls back to json-pretty
-  ceph osd metadata 1 | grep 'distro'
-  ceph --format plain osd metadata 1 | grep 'distro' # falls back to json-pretty
+  if [ `uname` == Linux ]; then
+    ceph osd metadata 1 | grep 'distro'
+    ceph --format plain osd metadata 1 | grep 'distro' # falls back to json-pretty
+  fi
   ceph osd out 0
   ceph osd dump | grep 'osd.0.*out'
   ceph osd in 0
   ceph osd dump | grep 'osd.0.*in'
   ceph osd find 0
 
-  f=$TMPDIR/map.$$
+  # make sure mark out preserves weight
+  ceph osd reweight osd.0 .5
+  ceph osd dump | grep ^osd.0 | grep 'weight 0.5'
+  ceph osd out 0
+  ceph osd in 0
+  ceph osd dump | grep ^osd.0 | grep 'weight 0.5'
+
+  f=$TEMP_DIR/map.$$
   ceph osd getcrushmap -o $f
   [ -s $f ]
   ceph osd setcrushmap -i $f
@@ -1228,7 +1260,7 @@ function test_mon_osd()
   ceph osd pool delete data data --yes-i-really-really-mean-it
 
   ceph osd pause
-  ceph osd dump | grep 'flags pauserd,pausewr'
+  ceph osd dump | grep 'flags.*pauserd,pausewr'
   ceph osd unpause
 
   ceph osd tree
@@ -1335,6 +1367,7 @@ function test_mon_pg()
   ceph pg ls
   ceph pg ls 0
   ceph pg ls stale
+  expect_false ceph pg ls scrubq
   ceph pg ls active stale repair recovering
   ceph pg ls 0 active
   ceph pg ls 0 active stale
@@ -1352,8 +1385,8 @@ function test_mon_pg()
   ceph pg ls-by-pool rbd active stale
   # can't test this...
   # ceph pg force_create_pg
-  ceph pg getmap -o $TMPDIR/map.$$
-  [ -s $TMPDIR/map.$$ ]
+  ceph pg getmap -o $TEMP_DIR/map.$$
+  [ -s $TEMP_DIR/map.$$ ]
   ceph pg map 0.0 | grep acting
   ceph pg repair 0.0
   ceph pg scrub 0.0
@@ -1446,41 +1479,41 @@ function test_mon_osd_pool_set()
       expect_false ceph osd pool set $TEST_POOL_GETSET $flag 2
   done
 
-  expect_false "ceph osd pool get $TEST_POOL_GETSET scrub_min_interval | grep '.'"
+  ceph osd pool get $TEST_POOL_GETSET scrub_min_interval | expect_false grep '.'
   ceph osd pool set $TEST_POOL_GETSET scrub_min_interval 123456
   ceph osd pool get $TEST_POOL_GETSET scrub_min_interval | grep 'scrub_min_interval: 123456'
   ceph osd pool set $TEST_POOL_GETSET scrub_min_interval 0
-  expect_false "ceph osd pool get $TEST_POOL_GETSET scrub_min_interval | grep '.'"
+  ceph osd pool get $TEST_POOL_GETSET scrub_min_interval | expect_false grep '.'
 
-  expect_false "ceph osd pool get $TEST_POOL_GETSET scrub_max_interval | grep '.'"
+  ceph osd pool get $TEST_POOL_GETSET scrub_max_interval | expect_false grep '.'
   ceph osd pool set $TEST_POOL_GETSET scrub_max_interval 123456
   ceph osd pool get $TEST_POOL_GETSET scrub_max_interval | grep 'scrub_max_interval: 123456'
   ceph osd pool set $TEST_POOL_GETSET scrub_max_interval 0
-  expect_false "ceph osd pool get $TEST_POOL_GETSET scrub_max_interval | grep '.'"
+  ceph osd pool get $TEST_POOL_GETSET scrub_max_interval | expect_false grep '.'
 
-  expect_false "ceph osd pool get $TEST_POOL_GETSET deep_scrub_interval | grep '.'"
+  ceph osd pool get $TEST_POOL_GETSET deep_scrub_interval | expect_false grep '.'
   ceph osd pool set $TEST_POOL_GETSET deep_scrub_interval 123456
   ceph osd pool get $TEST_POOL_GETSET deep_scrub_interval | grep 'deep_scrub_interval: 123456'
   ceph osd pool set $TEST_POOL_GETSET deep_scrub_interval 0
-  expect_false "ceph osd pool get $TEST_POOL_GETSET deep_scrub_interval | grep '.'"
+  ceph osd pool get $TEST_POOL_GETSET deep_scrub_interval | expect_false grep '.'
 
-  expect_false "ceph osd pool get $TEST_POOL_GETSET recovery_priority | grep '.'"
+  ceph osd pool get $TEST_POOL_GETSET recovery_priority | expect_false grep '.'
   ceph osd pool set $TEST_POOL_GETSET recovery_priority 5 
   ceph osd pool get $TEST_POOL_GETSET recovery_priority | grep 'recovery_priority: 5'
   ceph osd pool set $TEST_POOL_GETSET recovery_priority 0
-  expect_false "ceph osd pool get $TEST_POOL_GETSET recovery_priority | grep '.'"
+  ceph osd pool get $TEST_POOL_GETSET recovery_priority | expect_false grep '.'
 
-  expect_false "ceph osd pool get $TEST_POOL_GETSET recovery_op_priority | grep '.'"
+  ceph osd pool get $TEST_POOL_GETSET recovery_op_priority | expect_false grep '.'
   ceph osd pool set $TEST_POOL_GETSET recovery_op_priority 5 
   ceph osd pool get $TEST_POOL_GETSET recovery_op_priority | grep 'recovery_op_priority: 5'
   ceph osd pool set $TEST_POOL_GETSET recovery_op_priority 0
-  expect_false "ceph osd pool get $TEST_POOL_GETSET recovery_op_priority | grep '.'"
+  ceph osd pool get $TEST_POOL_GETSET recovery_op_priority | expect_false grep '.'
 
-  expect_false "ceph osd pool get $TEST_POOL_GETSET scrub_priority | grep '.'"
+  ceph osd pool get $TEST_POOL_GETSET scrub_priority | expect_false grep '.'
   ceph osd pool set $TEST_POOL_GETSET scrub_priority 5 
   ceph osd pool get $TEST_POOL_GETSET scrub_priority | grep 'scrub_priority: 5'
   ceph osd pool set $TEST_POOL_GETSET scrub_priority 0
-  expect_false "ceph osd pool get $TEST_POOL_GETSET scrub_priority | grep '.'"
+  ceph osd pool get $TEST_POOL_GETSET scrub_priority | expect_false grep '.'
 
   ceph osd pool set $TEST_POOL_GETSET nopgchange 1
   expect_false ceph osd pool set $TEST_POOL_GETSET pg_num 10
@@ -1489,6 +1522,15 @@ function test_mon_osd_pool_set()
   ceph osd pool set $TEST_POOL_GETSET pg_num 10
   wait_for_clean
   ceph osd pool set $TEST_POOL_GETSET pgp_num 10
+
+  old_pgs=$(ceph osd pool get $TEST_POOL_GETSET pg_num | sed -e 's/pg_num: //')
+  new_pgs=$(($old_pgs+$(ceph osd stat | grep osdmap | awk '{print $3}')*32))
+  ceph osd pool set $TEST_POOL_GETSET pg_num $new_pgs
+  ceph osd pool set $TEST_POOL_GETSET pgp_num $new_pgs
+  wait_for_clean
+  old_pgs=$(ceph osd pool get $TEST_POOL_GETSET pg_num | sed -e 's/pg_num: //')
+  new_pgs=$(($old_pgs+$(ceph osd stat | grep osdmap | awk '{print $3}')*32+1))
+  expect_false ceph osd pool set $TEST_POOL_GETSET pg_num $new_pgs
 
   ceph osd pool set $TEST_POOL_GETSET nosizechange 1
   expect_false ceph osd pool set $TEST_POOL_GETSET size 2
@@ -1735,10 +1777,10 @@ function test_mon_tell()
 
 function test_mon_crushmap_validation()
 {
-  local map=$TMPDIR/map
+  local map=$TEMP_DIR/map
   ceph osd getcrushmap -o $map
 
-  local crushtool_path="${TMPDIR}/crushtool"
+  local crushtool_path="${TEMP_DIR}/crushtool"
   touch "${crushtool_path}"
   chmod +x "${crushtool_path}"
   local crushtool_path_old=`ceph-conf --show-config-value crushtool`
@@ -1889,6 +1931,7 @@ MON_TESTS+=" mon_crushmap_validation"
 MON_TESTS+=" mon_ping"
 MON_TESTS+=" mon_deprecated_commands"
 MON_TESTS+=" mon_caps"
+MON_TESTS+=" mon_cephdf_commands"
 OSD_TESTS+=" osd_bench"
 OSD_TESTS+=" osd_negative_filestore_merge_threshold"
 OSD_TESTS+=" tiering_agent"
@@ -1896,7 +1939,6 @@ OSD_TESTS+=" tiering_agent"
 MDS_TESTS+=" mds_tell"
 MDS_TESTS+=" mon_mds"
 MDS_TESTS+=" mon_mds_metadata"
-MDS_TESTS+=" mon_cephdf_commands"
 
 TESTS+=$MON_TESTS
 TESTS+=$OSD_TESTS

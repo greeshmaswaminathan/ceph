@@ -12,6 +12,7 @@
  *
  */
 
+#include "include/compat.h"
 #include "common/Thread.h"
 #include "common/code_environment.h"
 #include "common/debug.h"
@@ -22,6 +23,7 @@
 #include <errno.h>
 #include <iostream>
 #include <pthread.h>
+
 #include <signal.h>
 #include <sstream>
 #include <stdlib.h>
@@ -83,7 +85,7 @@ void *Thread::entry_wrapper()
   if (pid && cpuid >= 0)
     _set_affinity(cpuid);
 
-  pthread_setname_np(pthread_self(), thread_name);
+  ceph_pthread_setname(pthread_self(), thread_name);
   return entry();
 }
 

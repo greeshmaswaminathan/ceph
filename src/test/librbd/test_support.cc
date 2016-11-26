@@ -1,6 +1,7 @@
 // -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 #include "test/librbd/test_support.h"
+#include "include/rbd_types.h"
 #include <sstream>
 
 bool get_features(uint64_t *features) {
@@ -36,4 +37,32 @@ int create_image_pp(librbd::RBD &rbd, librados::IoCtx &ioctx,
   } else {
     return rbd.create2(ioctx, name.c_str(), size, features, &order);
   }
+}
+
+int get_image_id(librbd::Image &image, std::string *image_id)
+{
+  int r = image.get_id(image_id);
+  if (r < 0) {
+    return r;
+  }
+  return 0;
+}
+
+int create_image_data_pool(librados::Rados &rados, std::string &data_pool, bool *created) {
+  std::string pool;
+  int r = rados.conf_get("rbd_default_data_pool", pool);
+  if (r != 0) {
+    return r;
+  } else if (pool.empty()) {
+    return 0;
+  }
+
+  r = rados.pool_create(pool.c_str());
+  if ((r == 0) || (r == -EEXIST)) {
+    data_pool = pool;
+    *created = (r == 0);
+    return 0;
+  }
+
+  return r;
 }

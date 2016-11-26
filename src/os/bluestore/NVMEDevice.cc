@@ -63,11 +63,9 @@ static constexpr uint16_t inline_segment_num = 32;
 enum {
   l_bluestore_nvmedevice_first = 632430,
   l_bluestore_nvmedevice_aio_write_lat,
-  l_bluestore_nvmedevice_aio_zero_lat,
   l_bluestore_nvmedevice_read_lat,
   l_bluestore_nvmedevice_flush_lat,
   l_bluestore_nvmedevice_aio_write_queue_lat,
-  l_bluestore_nvmedevice_aio_zero_queue_lat,
   l_bluestore_nvmedevice_read_queue_lat,
   l_bluestore_nvmedevice_flush_queue_lat,
   l_bluestore_nvmedevice_queue_ops,
@@ -210,13 +208,11 @@ class SharedDriverData {
     PerfCountersBuilder b(g_ceph_context, string("NVMEDevice-AIOThread-"+stringify(this)),
                           l_bluestore_nvmedevice_first, l_bluestore_nvmedevice_last);
     b.add_time_avg(l_bluestore_nvmedevice_aio_write_lat, "aio_write_lat", "Average write completing latency");
-    b.add_time_avg(l_bluestore_nvmedevice_aio_zero_lat, "aio_zero_lat", "Average zero completing latency");
     b.add_time_avg(l_bluestore_nvmedevice_read_lat, "read_lat", "Average read completing latency");
     b.add_time_avg(l_bluestore_nvmedevice_flush_lat, "flush_lat", "Average flush completing latency");
     b.add_u64(l_bluestore_nvmedevice_queue_ops, "queue_ops", "Operations in nvme queue");
     b.add_time_avg(l_bluestore_nvmedevice_polling_lat, "polling_lat", "Average polling latency");
     b.add_time_avg(l_bluestore_nvmedevice_aio_write_queue_lat, "aio_write_queue_lat", "Average queue write request latency");
-    b.add_time_avg(l_bluestore_nvmedevice_aio_zero_queue_lat, "aio_zero_queue_lat", "Average queue zero request latency");
     b.add_time_avg(l_bluestore_nvmedevice_read_queue_lat, "read_queue_lat", "Average queue read request latency");
     b.add_time_avg(l_bluestore_nvmedevice_flush_queue_lat, "flush_queue_lat", "Average queue flush request latency");
     b.add_u64_counter(l_bluestore_nvmedevice_buffer_alloc_failed, "buffer_alloc_failed", "Alloc data buffer failed count");
@@ -374,7 +370,7 @@ void SharedDriverData::_aio_thread()
 {
   dout(1) << __func__ << " start" << dendl;
   if (spdk_nvme_register_io_thread() != 0) {
-    assert(0);
+    ceph_abort();
   }
 
   if (data_buf_mempool.empty()) {
@@ -425,27 +421,11 @@ void SharedDriverData::_aio_thread()
             t->ctx->nvme_task_first = t->ctx->nvme_task_last = nullptr;
             delete t;
             derr << __func__ << " failed to do write command" << dendl;
-            assert(0);
+            ceph_abort();
           }
           cur = ceph::coarse_real_clock::now(g_ceph_context);
           auto dur = std::chrono::duration_cast<std::chrono::nanoseconds>(cur - start);
           logger->tinc(l_bluestore_nvmedevice_aio_write_queue_lat, dur);
-          break;
-        }
-        case IOCommand::ZERO_COMMAND:
-        {
-          dout(20) << __func__ << " zero command issued " << lba_off << "~" << lba_count << dendl;
-          assert(zero_command_support);
-          r = spdk_nvme_ns_cmd_write_zeroes(ns, lba_off, lba_count, io_complete, t, 0);
-          if (r < 0) {
-            t->ctx->nvme_task_first = t->ctx->nvme_task_last = nullptr;
-            delete t;
-            derr << __func__ << " failed to do zero command" << dendl;
-            assert(0);
-          }
-          cur = ceph::coarse_real_clock::now(g_ceph_context);
-          auto dur = std::chrono::duration_cast<std::chrono::nanoseconds>(cur - start);
-          logger->tinc(l_bluestore_nvmedevice_aio_zero_queue_lat, dur);
           break;
         }
         case IOCommand::READ_COMMAND:
@@ -570,7 +550,7 @@ class NVMEManager {
     ns = spdk_nvme_ctrlr_get_ns(c, 1);
     if (!ns) {
       derr << __func__ << " failed to get namespace at 1" << dendl;
-      assert(0);
+      ceph_abort();
     }
     dout(1) << __func__ << " successfully attach nvme device at" << name
             << " " << spdk_pci_device_get_bus(pci_dev) << ":" << spdk_pci_device_get_dev(pci_dev) << ":" << spdk_pci_device_get_func(pci_dev) << dendl;
@@ -601,7 +581,7 @@ static bool probe_cb(void *cb_ctx, struct spdk_pci_device *pci_dev)
   }
 
   if (ctx->sn_tag.compare(string(serial_number, 16))) {
-    dout(0) << __func__ << " device serial number not match " << serial_number << dendl;
+    dout(0) << __func__ << " device serial number (" << ctx->sn_tag << ") not match " << serial_number << dendl;
     return false;
   }
 
@@ -672,7 +652,7 @@ int NVMEManager::try_get(const string &sn_tag, SharedDriverData **driver)
         int r = rte_eal_init(sizeof(ealargs) / sizeof(ealargs[0]), (char **)(void *)(uintptr_t)ealargs);
         if (r < 0) {
           derr << __func__ << " failed to do rte_eal_init" << dendl;
-          assert(0);
+          ceph_abort();
         }
 
         request_mempool = rte_mempool_create("nvme_request", 512,
@@ -681,7 +661,7 @@ int NVMEManager::try_get(const string &sn_tag, SharedDriverData **driver)
                                              SOCKET_ID_ANY, 0);
         if (request_mempool == NULL) {
           derr << __func__ << " failed to create memory pool for nvme requests" << dendl;
-          assert(0);
+          ceph_abort();
         }
 
         pci_system_init();
@@ -732,12 +712,8 @@ void io_complete(void *t, const struct spdk_nvme_cpl *completion)
   ++driver->completed_op_seq;
   auto dur = std::chrono::duration_cast<std::chrono::nanoseconds>(
       ceph::coarse_real_clock::now(g_ceph_context) - task->start);
-  if (task->command == IOCommand::WRITE_COMMAND ||
-      task->command == IOCommand::ZERO_COMMAND) {
-    if (task->command == IOCommand::WRITE_COMMAND)
-      driver->logger->tinc(l_bluestore_nvmedevice_aio_write_lat, dur);
-    else
-      driver->logger->tinc(l_bluestore_nvmedevice_aio_zero_lat, dur);
+  if (task->command == IOCommand::WRITE_COMMAND) {
+    driver->logger->tinc(l_bluestore_nvmedevice_aio_write_lat, dur);
     assert(!spdk_nvme_cpl_is_error(completion));
     dout(20) << __func__ << " write/zero op successfully, left "
              << driver->queue_op_seq - driver->completed_op_seq << dendl;
@@ -786,7 +762,11 @@ void io_complete(void *t, const struct spdk_nvme_cpl *completion)
 #define dout_prefix *_dout << "bdev(" << name << ") "
 
 NVMEDevice::NVMEDevice(aio_callback_t cb, void *cbpriv)
-    : buffer_lock("NVMEDevice::buffer_lock"),
+    : driver(NULL),
+      size(0),
+      block_size(0),
+      aio_stop(false),
+      buffer_lock("NVMEDevice::buffer_lock"),
       aio_callback(cb),
       aio_callback_priv(cbpriv)
 {
@@ -819,6 +799,9 @@ int NVMEDevice::open(string p)
     derr << __func__ << " unable to read " << p << ": " << cpp_strerror(r) << dendl;
     return r;
   }
+  while (r > 0 && !isalpha(buf[r-1])) {
+    --r;
+  }
   serial_number = string(buf, r);
   r = manager.try_get(serial_number, &driver);
   if (r < 0) {
@@ -833,6 +816,12 @@ int NVMEDevice::open(string p)
     zeros = buffer::create_page_aligned(1048576);
     zeros.zero();
   }
+
+  //nvme is non-rotational device.
+  rotational = false;
+
+  // round size down to an even block
+  size &= ~(block_size - 1);
 
   dout(1) << __func__ << " size " << size << " (" << pretty_si_t(size) << "B)"
           << " block_size " << block_size << " (" << pretty_si_t(block_size)
@@ -920,46 +909,6 @@ int NVMEDevice::aio_write(
   return 0;
 }
 
-int NVMEDevice::aio_zero(
-    uint64_t off,
-    uint64_t len,
-    IOContext *ioc)
-{
-  dout(5) << __func__ << " " << off << "~" << len << dendl;
-  assert(off % block_size == 0);
-  assert(len % block_size == 0);
-  assert(len > 0);
-  assert(off < size);
-  assert(off + len <= size);
-
-  if (driver->zero_command_support) {
-    Task *t = new Task(this, IOCommand::ZERO_COMMAND, off, len);
-    t->ctx = ioc;
-    Task *first = static_cast<Task*>(ioc->nvme_task_first);
-    Task *last = static_cast<Task*>(ioc->nvme_task_last);
-    if (last)
-      last->next = t;
-    if (!first)
-      ioc->nvme_task_first = t;
-    ioc->nvme_task_last = t;
-    ++ioc->num_pending;
-  } else {
-    assert(zeros.length());
-    bufferlist bl;
-    while (len > 0) {
-      bufferlist t;
-      t.append(zeros, 0, MIN(zeros.length(), len));
-      len -= t.length();
-      bl.claim_append(t);
-    }
-    // note: this works with aio only becaues the actual buffer is
-    // this->zeros, which is page-aligned and never freed.
-    return aio_write(off, bl, ioc, false);
-  }
-
-  return 0;
-}
-
 int NVMEDevice::read(uint64_t off, uint64_t len, bufferlist *pbl,
                      IOContext *ioc,
                      bool buffered)
@@ -999,7 +948,7 @@ int NVMEDevice::read(uint64_t off, uint64_t len, bufferlist *pbl,
   return r;
 }
 
-int NVMEDevice::read_buffered(uint64_t off, uint64_t len, char *buf)
+int NVMEDevice::read_random(uint64_t off, uint64_t len, char *buf, bool buffered)
 {
   assert(len > 0);
   assert(off < size);

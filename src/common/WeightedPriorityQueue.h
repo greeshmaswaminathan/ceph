@@ -84,7 +84,8 @@ class WeightedPriorityQueue :  public OpQueue <T, K>
       }
       //Get the cost of the next item to dequeue
       unsigned get_cost() const {
-	return lp.begin()->cost;
+        assert(!empty());
+        return lp.begin()->cost;
       }
       T pop() {
 	assert(!lp.empty());
@@ -166,7 +167,8 @@ class WeightedPriorityQueue :  public OpQueue <T, K>
 	ret.first->insert(cost, item, front);
       }
       unsigned get_cost() const {
-	return next->get_cost();
+        assert(!empty());
+        return next->get_cost();
       }
       T pop() {
         T ret = next->pop();
@@ -211,8 +213,10 @@ class WeightedPriorityQueue :  public OpQueue <T, K>
 	return count;
       }
       void dump(ceph::Formatter *f) const {
-	f->dump_int("num_keys", next->get_size());
-	f->dump_int("first_item_cost", next->get_cost());
+        f->dump_int("num_keys", next->get_size());
+        if (!empty()) {
+          f->dump_int("first_item_cost", next->get_cost());
+        }
       }
     };
     class Queue {
@@ -357,14 +361,14 @@ class WeightedPriorityQueue :  public OpQueue <T, K>
     void enqueue_front(K cl, unsigned p, unsigned cost, T item) override final {
       normal.insert(p, cl, cost, item, true);
     }
-    T dequeue() {
+    T dequeue() override {
       assert(strict.size + normal.size > 0);
       if (!strict.empty()) {
 	return strict.pop(true);
       }
       return normal.pop();
     }
-    void dump(ceph::Formatter *f) const {
+    void dump(ceph::Formatter *f) const override {
       f->open_array_section("high_queues");
       strict.dump(f);
       f->close_section();

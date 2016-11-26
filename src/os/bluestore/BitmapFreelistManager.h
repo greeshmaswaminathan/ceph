@@ -21,6 +21,7 @@ class BitmapFreelistManager : public FreelistManager {
   uint64_t size;            ///< size of device (bytes)
   uint64_t bytes_per_block; ///< bytes per block (bdev_block_size)
   uint64_t blocks_per_key;  ///< blocks (bits) per key/value pair
+  uint64_t bytes_per_key;   ///< bytes per key/value pair
   uint64_t blocks;          ///< size of device (blocks, size rounded up)
 
   uint64_t block_mask;  ///< mask to convert byte offset to block offset
@@ -66,6 +67,10 @@ public:
   void release(
     uint64_t offset, uint64_t length,
     KeyValueDB::Transaction txn) override;
+
+  bool supports_parallel_transactions() override {
+    return true;
+  }
 };
 
 #endif

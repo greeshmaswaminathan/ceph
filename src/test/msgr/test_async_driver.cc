@@ -25,6 +25,8 @@
 #include <arpa/inet.h>
 #include "include/Context.h"
 #include "include/atomic.h"
+#include "common/Mutex.h"
+#include "common/Cond.h"
 #include "global/global_init.h"
 #include "common/ceph_argparse.h"
 #include "msg/async/Event.h"
@@ -52,8 +54,10 @@
 #include "msg/async/EventKqueue.h"
 #endif
 #include "msg/async/EventSelect.h"
+#include "test/unit.h"
 
 #include <gtest/gtest.h>
+
 
 #if GTEST_HAS_PARAM_TEST
 
@@ -74,7 +78,7 @@ class EventDriverTest : public ::testing::TestWithParam<const char*> {
 #endif
     if (strcmp(GetParam(), "select"))
       driver = new SelectDriver(g_ceph_context);
-    driver->init(100);
+    driver->init(NULL, 100);
   }
   virtual void TearDown() {
     delete driver;
@@ -113,7 +117,7 @@ TEST_P(EventDriverTest, PipeTest) {
   r = driver->event_wait(fired_events, &tv);
   ASSERT_EQ(r, 0);
 
-  char c;
+  char c = 'A';
   r = write(fds[1], &c, sizeof(c));
   ASSERT_EQ(r, 1);
   r = driver->event_wait(fired_events, &tv);
@@ -253,7 +257,8 @@ class FakeEvent : public EventCallback {
 TEST(EventCenterTest, FileEventExpansion) {
   vector<int> sds;
   EventCenter center(g_ceph_context);
-  center.init(100);
+  center.init(100, 0);
+  center.set_owner();
   EventCallbackRef e(new FakeEvent());
   for (int i = 0; i < 300; i++) {
     int sd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -272,8 +277,8 @@ class Worker : public Thread {
 
  public:
   EventCenter center;
-  explicit Worker(CephContext *c): cct(c), done(false), center(c) {
-    center.init(100);
+  explicit Worker(CephContext *c, int idx): cct(c), done(false), center(c) {
+    center.init(100, idx);
   }
   void stop() {
     done = true; 
@@ -303,7 +308,7 @@ class CountEvent: public EventCallback {
 };
 
 TEST(EventCenterTest, DispatchTest) {
-  Worker worker1(g_ceph_context), worker2(g_ceph_context);
+  Worker worker1(g_ceph_context, 1), worker2(g_ceph_context, 2);
   atomic_t count(0);
   Mutex lock("DispatchTest::lock");
   Cond cond;
@@ -320,6 +325,8 @@ TEST(EventCenterTest, DispatchTest) {
   }
   worker1.stop();
   worker2.stop();
+  worker1.join();
+  worker2.join();
 }
 
 INSTANTIATE_TEST_CASE_P(
@@ -348,17 +355,6 @@ TEST(DummyTest, ValueParameterizedTestsAreNotSupportedOnThisPlatform) {}
 
 #endif
 
-
-int main(int argc, char **argv) {
-  vector<const char*> args;
-  argv_to_vec(argc, (const char **)argv, args);
-
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, 0);
-  common_init_finish(g_ceph_context);
-
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}
 
 /*
  * Local Variables:

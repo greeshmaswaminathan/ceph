@@ -209,11 +209,11 @@ static string xio_uri_from_entity(const string &type,
 
   switch(addr.get_family()) {
   case AF_INET:
-    host = inet_ntop(AF_INET, &addr.u.sin.sin_addr, addr_buf,
+    host = inet_ntop(AF_INET, &addr.in4_addr().sin_addr, addr_buf,
 		     INET_ADDRSTRLEN);
     break;
   case AF_INET6:
-    host = inet_ntop(AF_INET6, &addr.u.sin6.sin6_addr, addr_buf,
+    host = inet_ntop(AF_INET6, &addr.in6_addr().sin6_addr, addr_buf,
 		     INET6_ADDRSTRLEN);
     break;
   default:
@@ -350,13 +350,13 @@ static ostream& _prefix(std::ostream *_dout, XioMessenger *msgr) {
 }
 
 XioMessenger::XioMessenger(CephContext *cct, entity_name_t name,
-			   string mname, uint64_t _nonce, uint64_t features,
-			   DispatchStrategy *ds)
+			   string mname, uint64_t _nonce,
+			   uint64_t cflags, DispatchStrategy *ds)
   : SimplePolicyMessenger(cct, name, mname, _nonce),
     XioInit(cct),
     nsessions(0),
     shutdown_called(false),
-    portals(this, get_nportals(), get_nconns_per_portal()),
+    portals(this, get_nportals(cflags), get_nconns_per_portal(cflags)),
     dispatch_strategy(ds),
     loop_con(new XioLoopbackConnection(this)),
     special_handling(0),
@@ -378,14 +378,13 @@ XioMessenger::XioMessenger(CephContext *cct, entity_name_t name,
   /* update class instance count */
   nInstances.inc();
 
-  local_features = features;
-  loop_con->set_features(features);
+  loop_con->set_features(CEPH_FEATURES_ALL);
 
   ldout(cct,2) << "Create msgr: " << this << " instance: "
     << nInstances.read() << " type: " << name.type_str()
-    << " subtype: " << mname << " nportals: " << get_nportals()
-    << " nconns_per_portal: " << get_nconns_per_portal() << " features: "
-    << features << dendl;
+    << " subtype: " << mname << " nportals: " << get_nportals(cflags)
+    << " nconns_per_portal: " << get_nconns_per_portal(cflags)
+    << dendl;
 
 } /* ctor */
 
@@ -399,14 +398,27 @@ int XioMessenger::pool_hint(uint32_t dsize) {
 				   XMSG_MEMPOOL_QUANTUM, 0);
 }
 
-int XioMessenger::get_nconns_per_portal()
+int XioMessenger::get_nconns_per_portal(uint64_t cflags)
 {
-  return max(cct->_conf->xio_max_conns_per_portal, 32);
+  const int XIO_DEFAULT_NUM_CONNS_PER_PORTAL = 8;
+  int nconns = XIO_DEFAULT_NUM_CONNS_PER_PORTAL;
+
+  if (cflags & Messenger::HAS_MANY_CONNECTIONS)
+    nconns = max(cct->_conf->xio_max_conns_per_portal, XIO_DEFAULT_NUM_CONNS_PER_PORTAL);
+  else if (cflags & Messenger::HEARTBEAT)
+    nconns = max(cct->_conf->osd_heartbeat_min_peers * 4, XIO_DEFAULT_NUM_CONNS_PER_PORTAL);
+
+  return nconns;
 }
 
-int XioMessenger::get_nportals()
+int XioMessenger::get_nportals(uint64_t cflags)
 {
-  return max(cct->_conf->xio_portal_threads, 1);
+  int nportals = 1;
+
+  if (cflags & Messenger::HAS_HEAVY_TRAFFIC)
+    nportals = max(cct->_conf->xio_portal_threads, 1);
+
+  return nportals;
 }
 
 void XioMessenger::learned_addr(const entity_addr_t &peer_addr_for_me)
@@ -424,7 +436,7 @@ void XioMessenger::learned_addr(const entity_addr_t &peer_addr_for_me)
   if (need_addr) {
     entity_addr_t t = peer_addr_for_me;
     t.set_port(my_inst.addr.get_port());
-    my_inst.addr.u = t.u;
+    my_inst.addr.set_sockaddr(t.get_sockaddr());
     ldout(cct,2) << "learned my addr " << my_inst.addr << dendl;
     need_addr = false;
     // init_local_connection();
@@ -534,22 +546,7 @@ int XioMessenger::session_event(struct xio_session *session,
     ldout(cct,2) << xio_session_event_str(event_data->event)
       << " xcon " << xcon << " session " << session  << dendl;
     if (likely(!!xcon)) {
-      Spinlock::Locker lckr(conns_sp);
-      XioConnection::EntitySet::iterator conn_iter =
-	conns_entity_map.find(xcon->peer, XioConnection::EntityComp());
-      if (conn_iter != conns_entity_map.end()) {
-	XioConnection *xcon2 = &(*conn_iter);
-	if (xcon == xcon2) {
-	  conns_entity_map.erase(conn_iter);
-	}
-      }
-      /* check if citer on conn_list */
-      if (xcon->conns_hook.is_linked()) {
-        /* now find xcon on conns_list and erase */
-        XioConnection::ConnList::iterator citer =
-            XioConnection::ConnList::s_iterator_to(*xcon);
-        conns_list.erase(citer);
-      }
+      unregister_xcon(xcon);
       xcon->on_disconnect_event();
     }
     break;
@@ -557,6 +554,11 @@ int XioMessenger::session_event(struct xio_session *session,
     xcon = static_cast<XioConnection*>(event_data->conn_user_context);
     ldout(cct,2) << xio_session_event_str(event_data->event)
       << " xcon " << xcon << " session " << session << dendl;
+    /*
+     * There are flows where Accelio sends teardown event without going
+     * through disconnect event. so we make sure we cleaned the connection.
+     */
+    unregister_xcon(xcon);
     xcon->on_teardown_event();
     break;
   case XIO_SESSION_TEARDOWN_EVENT:
@@ -772,7 +774,7 @@ static inline XioMsg* pool_alloc_xio_msg(Message *m, XioConnection *xcon,
     return NULL;
   XioMsg *xmsg = reinterpret_cast<XioMsg*>(mp_mem.addr);
   assert(!!xmsg);
-  new (xmsg) XioMsg(m, xcon, mp_mem, ex_cnt);
+  new (xmsg) XioMsg(m, xcon, mp_mem, ex_cnt, CEPH_FEATURES_ALL);
   return xmsg;
 }
 
@@ -1042,6 +1044,28 @@ ConnectionRef XioMessenger::get_loopback_connection()
 {
   return (loop_con.get());
 } /* get_loopback_connection */
+
+void XioMessenger::unregister_xcon(XioConnection *xcon)
+{
+  Spinlock::Locker lckr(conns_sp);
+
+  XioConnection::EntitySet::iterator conn_iter =
+	conns_entity_map.find(xcon->peer, XioConnection::EntityComp());
+  if (conn_iter != conns_entity_map.end()) {
+	XioConnection *xcon2 = &(*conn_iter);
+	if (xcon == xcon2) {
+	  conns_entity_map.erase(conn_iter);
+	}
+  }
+
+  /* check if citer on conn_list */
+  if (xcon->conns_hook.is_linked()) {
+    /* now find xcon on conns_list and erase */
+    XioConnection::ConnList::iterator citer =
+        XioConnection::ConnList::s_iterator_to(*xcon);
+    conns_list.erase(citer);
+  }
+}
 
 void XioMessenger::mark_down(const entity_addr_t& addr)
 {

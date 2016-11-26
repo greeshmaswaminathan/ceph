@@ -1,11 +1,13 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 
+#include "include/compat.h"
 #include "CrushLocation.h"
 #include "CrushWrapper.h"
 #include "common/config.h"
 #include "include/str_list.h"
 #include "common/debug.h"
+#include "include/compat.h"
 
 #include <common/SubProcess.h>
 

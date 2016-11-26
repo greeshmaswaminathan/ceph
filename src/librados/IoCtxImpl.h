@@ -46,9 +46,6 @@ struct librados::IoCtxImpl {
   xlist<AioCompletionImpl*> aio_write_list;
   map<ceph_tid_t, std::list<AioCompletionImpl*> > aio_write_waiters;
 
-  Mutex cached_pool_names_lock;
-  std::list<std::string> cached_pool_names;
-
   Objecter *objecter;
 
   IoCtxImpl();
@@ -90,7 +87,7 @@ struct librados::IoCtxImpl {
     return poolid;
   }
 
-  const string& get_cached_pool_name();
+  string get_cached_pool_name();
 
   int get_object_hash_position(const std::string& oid, uint32_t *hash_postion);
   int get_object_pg_hash_position(const std::string& oid, uint32_t *pg_hash_position);
@@ -205,11 +202,21 @@ struct librados::IoCtxImpl {
 		     const bufferlist& bl);
   int aio_writesame(const object_t &oid, AioCompletionImpl *c,
 		    const bufferlist& bl, size_t write_len, uint64_t off);
-  int aio_remove(const object_t &oid, AioCompletionImpl *c);
+  int aio_remove(const object_t &oid, AioCompletionImpl *c, int flags=0);
   int aio_exec(const object_t& oid, AioCompletionImpl *c, const char *cls,
 	       const char *method, bufferlist& inbl, bufferlist *outbl);
+  int aio_exec(const object_t& oid, AioCompletionImpl *c, const char *cls,
+	       const char *method, bufferlist& inbl, char *buf, size_t out_len);
   int aio_stat(const object_t& oid, AioCompletionImpl *c, uint64_t *psize, time_t *pmtime);
   int aio_stat2(const object_t& oid, AioCompletionImpl *c, uint64_t *psize, struct timespec *pts);
+  int aio_getxattr(const object_t& oid, AioCompletionImpl *c,
+		   const char *name, bufferlist& bl);
+  int aio_setxattr(const object_t& oid, AioCompletionImpl *c,
+		   const char *name, bufferlist& bl);
+  int aio_getxattrs(const object_t& oid, AioCompletionImpl *c,
+		    map<string, bufferlist>& attrset);
+  int aio_rmxattr(const object_t& oid, AioCompletionImpl *c,
+		  const char *name);
   int aio_cancel(AioCompletionImpl *c);
 
   int pool_change_auid(unsigned long long auid);
@@ -237,9 +244,14 @@ struct librados::IoCtxImpl {
   void set_sync_op_version(version_t ver);
   int watch(const object_t& oid, uint64_t *cookie, librados::WatchCtx *ctx,
 	    librados::WatchCtx2 *ctx2, bool internal = false);
+  int watch(const object_t& oid, uint64_t *cookie, librados::WatchCtx *ctx,
+	    librados::WatchCtx2 *ctx2, uint32_t timeout, bool internal = false);
   int aio_watch(const object_t& oid, AioCompletionImpl *c, uint64_t *cookie,
                 librados::WatchCtx *ctx, librados::WatchCtx2 *ctx2,
                 bool internal = false);
+  int aio_watch(const object_t& oid, AioCompletionImpl *c, uint64_t *cookie,
+                librados::WatchCtx *ctx, librados::WatchCtx2 *ctx2,
+                uint32_t timeout, bool internal = false);
   int watch_check(uint64_t cookie);
   int unwatch(uint64_t cookie);
   int aio_unwatch(uint64_t cookie, AioCompletionImpl *c);

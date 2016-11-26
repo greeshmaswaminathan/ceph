@@ -5,11 +5,14 @@
 #define CEPH_LIBRBD_MIRRORING_WATCHER_H
 
 #include "include/int_types.h"
-#include "include/rados/librados.hpp"
 #include "cls/rbd/cls_rbd_types.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/ObjectWatcher.h"
 #include "librbd/mirroring_watcher/Types.h"
+
+namespace librados {
+  class IoCtx;
+}
 
 namespace librbd {
 
@@ -26,6 +29,11 @@ public:
                                   cls::rbd::MirrorImageState mirror_image_state,
                                   const std::string &image_id,
                                   const std::string &global_image_id);
+  static void notify_image_updated(librados::IoCtx &io_ctx,
+                                   cls::rbd::MirrorImageState mirror_image_state,
+                                   const std::string &image_id,
+                                   const std::string &global_image_id,
+                                   Context *on_finish);
 
   virtual void handle_mode_updated(cls::rbd::MirrorMode mirror_mode,
                                    Context *on_ack) = 0;

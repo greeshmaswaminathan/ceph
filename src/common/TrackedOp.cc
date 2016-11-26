@@ -87,6 +87,35 @@ void OpHistory::dump_ops(utime_t now, Formatter *f)
   f->close_section();
 }
 
+struct ShardedTrackingData {
+  Mutex ops_in_flight_lock_sharded;
+  xlist<TrackedOp *> ops_in_flight_sharded;
+  explicit ShardedTrackingData(string lock_name):
+      ops_in_flight_lock_sharded(lock_name.c_str()) {}
+};
+
+OpTracker::OpTracker(CephContext *cct_, bool tracking, uint32_t num_shards):
+  seq(0),
+  num_optracker_shards(num_shards),
+  complaint_time(0), log_threshold(0),
+  tracking_enabled(tracking),
+  lock("OpTracker::lock"), cct(cct_) {
+    for (uint32_t i = 0; i < num_optracker_shards; i++) {
+      char lock_name[32] = {0};
+      snprintf(lock_name, sizeof(lock_name), "%s:%d", "OpTracker::ShardedLock", i);
+      ShardedTrackingData* one_shard = new ShardedTrackingData(lock_name);
+      sharded_in_flight_list.push_back(one_shard);
+    }
+}
+
+OpTracker::~OpTracker() {
+  while (!sharded_in_flight_list.empty()) {
+    assert((sharded_in_flight_list.back())->ops_in_flight_sharded.empty());
+    delete sharded_in_flight_list.back();
+    sharded_in_flight_list.pop_back();
+  }
+}
+
 bool OpTracker::dump_historic_ops(Formatter *f)
 {
   RWLock::RLocker l(lock);
@@ -173,7 +202,7 @@ void OpTracker::unregister_inflight_op(TrackedOp *i)
   }
 }
 
-bool OpTracker::check_ops_in_flight(std::vector<string> &warning_vector)
+bool OpTracker::check_ops_in_flight(std::vector<string> &warning_vector, int *slow)
 {
   RWLock::RLocker l(lock);
   if (!tracking_enabled)
@@ -214,7 +243,11 @@ bool OpTracker::check_ops_in_flight(std::vector<string> &warning_vector)
   //store summary message
   warning_vector.push_back("");
 
-  int slow = 0;     // total slow
+  int _slow = 0;    // total slow
+  if (!slow)
+    slow = &_slow; 
+  else
+    *slow = _slow;  // start from 0 anyway
   int warned = 0;   // total logged
   for (uint32_t iter = 0; iter < num_optracker_shards; iter++) {
     ShardedTrackingData* sdata = sharded_in_flight_list[iter];
@@ -224,7 +257,7 @@ bool OpTracker::check_ops_in_flight(std::vector<string> &warning_vector)
       continue;
     xlist<TrackedOp*>::iterator i = sdata->ops_in_flight_sharded.begin();    
     while (!i.end() && (*i)->get_initiated() < too_old) {
-      slow++;
+      (*slow)++;
 
       // exponential backoff of warning intervals
       if (warned < log_threshold &&
@@ -252,7 +285,7 @@ bool OpTracker::check_ops_in_flight(std::vector<string> &warning_vector)
   // off, we will stay silent.
   if (warned > 0) {
     stringstream ss;
-    ss << slow << " slow requests, " << warned << " included below; oldest blocked for > "
+    ss << *slow << " slow requests, " << warned << " included below; oldest blocked for > "
        << oldest_secs << " secs";
     warning_vector[0] = ss.str();
   }
@@ -336,7 +369,7 @@ void TrackedOp::dump(utime_t now, Formatter *f) const
   f->dump_float("duration", get_duration());
   {
     f->open_array_section("type_data");
-    _dump(now, f);
+    _dump(f);
     f->close_section();
   }
 }

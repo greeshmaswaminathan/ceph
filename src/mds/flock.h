@@ -87,7 +87,7 @@ public:
    * @param fl The filelock to check for
    * @returns True if the lock is waiting, false otherwise
    */
-  bool is_waiting(const ceph_filelock &fl);
+  bool is_waiting(const ceph_filelock &fl) const;
   /**
    * Remove a lock from the waiting_locks list
    *
@@ -144,7 +144,7 @@ private:
   bool is_deadlock(const ceph_filelock& fl,
 		   list<multimap<uint64_t, ceph_filelock>::iterator>&
 		      overlapping_locks,
-		   const ceph_filelock *first_fl=NULL, unsigned depth=0);
+		   const ceph_filelock *first_fl=NULL, unsigned depth=0) const;
 
   /**
    * Add a lock to the waiting_locks list
@@ -277,18 +277,18 @@ public:
 WRITE_CLASS_ENCODER(ceph_lock_state_t)
 
 
-inline ostream& operator<<(ostream& out, ceph_lock_state_t& l) {
+inline ostream& operator<<(ostream &out, const ceph_lock_state_t &l) {
   out << "ceph_lock_state_t. held_locks.size()=" << l.held_locks.size()
       << ", waiting_locks.size()=" << l.waiting_locks.size()
       << ", client_held_lock_counts -- " << l.client_held_lock_counts
       << "\n client_waiting_lock_counts -- " << l.client_waiting_lock_counts
       << "\n held_locks -- ";
-    for (multimap<uint64_t, ceph_filelock>::iterator iter = l.held_locks.begin();
+    for (auto iter = l.held_locks.begin();
          iter != l.held_locks.end();
          ++iter)
       out << iter->second;
     out << "\n waiting_locks -- ";
-    for (multimap<uint64_t, ceph_filelock>::iterator iter =l.waiting_locks.begin();
+    for (auto iter =l.waiting_locks.begin();
          iter != l.waiting_locks.end();
          ++iter)
       out << iter->second << "\n";

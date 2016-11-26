@@ -19,6 +19,7 @@
 #include <limits.h>
 #include <cstring>
 #include <boost/scope_exit.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 
 #include "Monitor.h"
 #include "common/version.h"
@@ -73,6 +74,7 @@
 #include "PGMonitor.h"
 #include "LogMonitor.h"
 #include "AuthMonitor.h"
+#include "MgrMonitor.h"
 #include "mon/QuorumService.h"
 #include "mon/HealthMonitor.h"
 #include "mon/ConfigKeyService.h"
@@ -165,7 +167,7 @@ Monitor::Monitor(CephContext* cct_, string nm, MonitorDBStore *s,
   elector(this),
   required_features(0),
   leader(0),
-  quorum_features(0),
+  quorum_con_features(0),
   // scrub
   scrub_version(0),
   scrub_event(NULL),
@@ -206,6 +208,7 @@ Monitor::Monitor(CephContext* cct_, string nm, MonitorDBStore *s,
   paxos_service[PAXOS_PGMAP] = new PGMonitor(this, paxos, "pgmap");
   paxos_service[PAXOS_LOG] = new LogMonitor(this, paxos, "logm");
   paxos_service[PAXOS_AUTH] = new AuthMonitor(this, paxos, "auth");
+  paxos_service[PAXOS_MGR] = new MgrMonitor(this, paxos, "mgr");
 
   health_monitor = new HealthMonitor(this);
   config_key_service = new ConfigKeyService(this, paxos);
@@ -240,6 +243,8 @@ PaxosService *Monitor::get_paxos_service_by_name(const string& name)
     return paxos_service[PAXOS_LOG];
   if (name == "auth")
     return paxos_service[PAXOS_AUTH];
+  if (name == "mgr")
+    return paxos_service[PAXOS_MGR];
 
   assert(0 == "given name does not match known paxos service");
   return NULL;
@@ -290,7 +295,7 @@ void Monitor::do_admin_command(string command, cmdmap_t& cmdmap, string format,
     args += cmd_vartype_stringify(p->second);
   }
   args = "[" + args + "]";
- 
+
   bool read_only = (command == "mon_status" ||
                     command == "mon metadata" ||
                     command == "quorum_status" ||
@@ -332,6 +337,123 @@ void Monitor::do_admin_command(string command, cmdmap_t& cmdmap, string format,
     if (f) {
       f->flush(ss);
     }
+  } else if (boost::starts_with(command, "debug mon features")) {
+  
+    // check if unsupported feature is set
+    if (!cct->check_experimental_feature_enabled("mon_debug_features_commands")) {
+      ss << "error: this is an experimental feature and is not enabled.";
+      goto abort;
+    }
+
+    if (command == "debug mon features list") {
+
+      mon_feature_t supported = ceph::features::mon::get_supported();
+      mon_feature_t persistent = ceph::features::mon::get_persistent();
+
+      if (f) {
+
+        f->open_object_section("features");
+        f->open_object_section("ceph-mon");
+        supported.dump_with_value(f.get(), "supported");
+        persistent.dump_with_value(f.get(), "persistent");
+        f->close_section(); // ceph-mon
+        f->open_object_section("monmap");
+        monmap->persistent_features.dump_with_value(f.get(), "persistent");
+        monmap->optional_features.dump_with_value(f.get(), "optional");
+        mon_feature_t required = monmap->get_required_features();
+        required.dump_with_value(f.get(), "required");
+        f->close_section(); // monmap
+        f->close_section(); // features
+
+        f->flush(ss);
+      } else {
+        ss << "only structured formats allowed when listing";
+      }
+    } else if (command == "debug mon features set" ||
+               command == "debug mon features set_val" ||
+               command == "debug mon features unset" ||
+               command == "debug mon features unset_val") {
+
+      string n;
+      if (!cmd_getval(cct, cmdmap, "feature", n)) {
+        ss << "missing feature to set";
+        goto abort;
+      }
+
+      string f_type;
+      bool do_persistent = false, do_optional = false;
+
+      if (cmd_getval(cct, cmdmap, "feature_type", f_type)) {
+        if (f_type == "--persistent") {
+          do_persistent = true;
+        } else {
+          do_optional = true;
+        }
+      }
+
+      mon_feature_t feature;
+
+      if (command == "debug mon features set" ||
+          command == "debug mon features unset") {
+        feature = ceph::features::mon::get_feature_by_name(n);
+        if (feature == ceph::features::mon::FEATURE_NONE) {
+          ss << "no such feature '" << n << "'";
+          goto abort;
+        }
+      } else {
+        uint64_t feature_val;
+        string interr;
+        feature_val = strict_strtoll(n.c_str(), 10, &interr);
+        if (!interr.empty()) {
+          ss << "unable to parse feature value: " << interr;
+          goto abort;
+        }
+
+        feature = mon_feature_t(feature_val);
+      }
+
+      bool do_unset = false;
+      if (boost::ends_with(command, "unset") ||
+          boost::ends_with(command, "unset_val")) {
+        do_unset = true;
+      }
+
+      ss << (do_unset? "un" : "") << "setting feature '";
+      feature.print_with_value(ss);
+      ss << "' on current monmap\n";
+      ss << "please note this change is not persistent; "
+         << "changes to monmap will overwrite the changes\n";
+
+      if (!do_persistent && !do_optional) {
+        if (ceph::features::mon::get_persistent().contains_all(feature)) {
+          do_persistent = true;
+        } else {
+          do_optional = true;
+        }
+      }
+
+      ss << "\n" << (do_unset ? "un" : "") << "setting ";
+
+      mon_feature_t &target_feature = (do_persistent ?
+          monmap->persistent_features : monmap->optional_features);
+
+      if (do_persistent) {
+        ss << "persistent feature";
+      } else {
+        ss << "optional feature";
+      }
+
+      if (do_unset) {
+        target_feature.unset_feature(feature);
+      } else {
+        target_feature.set_feature(feature);
+      }
+
+    } else {
+
+      ss << "unrecognized command";
+    }
+
   } else {
     assert(0 == "bad AdminSocket command binding");
   }
@@ -375,6 +497,7 @@ CompatSet Monitor::get_supported_features()
   compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_OSDMAP_ENC);
   compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_ERASURE_CODE_PLUGINS_V2);
   compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_ERASURE_CODE_PLUGINS_V3);
+  compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_KRAKEN);
   return compat;
 }
 
@@ -765,6 +888,46 @@ int Monitor::preinit()
                                      admin_hook,
                                      "show the ops currently in flight");
   assert(r == 0);
+
+  // debugging api
+  r = admin_socket->register_command("debug mon features list",
+                                     "debug mon features list",
+                                     admin_hook,
+                                     "list monmap features");
+  assert(r == 0);
+  r = admin_socket->register_command("debug mon features set",
+                                     "debug mon features set "
+                                     "name=feature,type=CephString "
+                                     "name=feature_type,type=CephChoices,req=false,"
+                                     "strings=--persistent|--optional",
+                                     admin_hook,
+                                     "set a given feature, by name, in the monmap");
+  assert(r == 0);
+  r = admin_socket->register_command("debug mon features set_val",
+                                     "debug mon features set_val "
+                                     "name=feature,type=CephString "
+                                     "name=feature_type,type=CephChoices,req=false,"
+                                     "strings=--persistent|--optional",
+                                     admin_hook,
+                                     "set a given feature, by value, in the monmap");
+  assert(r == 0);
+  r = admin_socket->register_command("debug mon features unset",
+                                     "debug mon features unset "
+                                     "name=feature,type=CephString "
+                                     "name=feature_type,type=CephChoices,req=false,"
+                                     "strings=--persistent|--optional",
+                                     admin_hook,
+                                     "unset a given feature, by name, in the monmap");
+  assert(r == 0);
+  r = admin_socket->register_command("debug mon features unset_val",
+                                     "debug mon features unset_val "
+                                     "name=feature,type=CephString "
+                                     "name=feature_type,type=CephChoices,req=false,"
+                                     "strings=--persistent|--optional",
+                                     admin_hook,
+                                     "unset a given feature, by value, in the monmap");
+  assert(r == 0);
+
   lock.Lock();
 
   // add ourselves as a conf observer
@@ -777,7 +940,7 @@ int Monitor::preinit()
 int Monitor::init()
 {
   dout(2) << "init" << dendl;
-  lock.Lock();
+  Mutex::Locker l(lock);
 
   // start ticker
   timer.init();
@@ -785,7 +948,6 @@ int Monitor::init()
 
   // i'm ready!
   messenger->add_dispatcher_tail(this);
-
 
   bootstrap();
 
@@ -797,7 +959,6 @@ int Monitor::init()
   get_classic_monitor_commands(&cmds, &cmdsize);
   MonCommand::encode_array(cmds, cmdsize, classic_commands_bl);
 
-  lock.Unlock();
   return 0;
 }
 
@@ -888,12 +1049,18 @@ void Monitor::shutdown()
     admin_socket->unregister_command("quorum enter");
     admin_socket->unregister_command("quorum exit");
     admin_socket->unregister_command("ops");
+    // debugging api
+    admin_socket->unregister_command("debug mon features list");
+    admin_socket->unregister_command("debug mon features set");
+    admin_socket->unregister_command("debug mon features set_val");
+    admin_socket->unregister_command("debug mon features unset");
+    admin_socket->unregister_command("debug mon features unset_val");
     delete admin_hook;
     admin_hook = NULL;
   }
 
   elector.shutdown();
-  
+
   // clean up
   paxos->shutdown();
   for (vector<PaxosService*>::iterator p = paxos_service.begin(); p != paxos_service.end(); ++p)
@@ -1600,16 +1767,13 @@ void Monitor::handle_probe(MonOpRequestRef op)
 
   case MMonProbe::OP_MISSING_FEATURES:
     derr << __func__ << " missing features, have " << CEPH_FEATURES_ALL
-	 << ", required " << required_features
-	 << ", missing " << (required_features & ~CEPH_FEATURES_ALL)
+	 << ", required " << m->required_features
+	 << ", missing " << (m->required_features & ~CEPH_FEATURES_ALL)
 	 << dendl;
     break;
   }
 }
 
-/**
- * @todo fix this. This is going to cause trouble.
- */
 void Monitor::handle_probe_probe(MonOpRequestRef op)
 {
   MMonProbe *m = static_cast<MMonProbe*>(op->get_req());
@@ -1828,8 +1992,6 @@ void Monitor::start_election()
   logger->inc(l_mon_num_elections);
   logger->inc(l_mon_election_call);
 
-  cancel_probe_timeout();
-
   clog->info() << "mon." << name << " calling new monitor election\n";
   elector.call_election();
 }
@@ -1851,7 +2013,10 @@ void Monitor::win_standalone_election()
   const MonCommand *my_cmds;
   int cmdsize;
   get_locally_supported_monitor_commands(&my_cmds, &cmdsize);
-  win_election(elector.get_epoch(), q, CEPH_FEATURES_ALL, my_cmds, cmdsize, NULL);
+  win_election(elector.get_epoch(), q,
+               CEPH_FEATURES_ALL,
+               ceph::features::mon::get_supported(),
+               my_cmds, cmdsize, NULL);
 }
 
 const utime_t& Monitor::get_leader_since() const
@@ -1865,18 +2030,34 @@ epoch_t Monitor::get_epoch()
   return elector.get_epoch();
 }
 
+void Monitor::_finish_svc_election()
+{
+  assert(state == STATE_LEADER || state == STATE_PEON);
+
+  for (auto p : paxos_service) {
+    // we already called election_finished() on monmon(); avoid callig twice
+    if (state == STATE_LEADER && p == monmon())
+      continue;
+    p->election_finished();
+  }
+}
+
 void Monitor::win_election(epoch_t epoch, set<int>& active, uint64_t features,
+                           const mon_feature_t& mon_features,
                            const MonCommand *cmdset, int cmdsize,
                            const set<int> *classic_monitors)
 {
   dout(10) << __func__ << " epoch " << epoch << " quorum " << active
-	   << " features " << features << dendl;
+	   << " features " << features
+           << " mon_features " << mon_features
+           << dendl;
   assert(is_electing());
   state = STATE_LEADER;
   leader_since = ceph_clock_now(g_ceph_context);
   leader = rank;
   quorum = active;
-  quorum_features = features;
+  quorum_con_features = features;
+  quorum_mon_features = mon_features;
   outside_quorum.clear();
 
   clog->info() << "mon." << name << "@" << rank
@@ -1893,11 +2074,7 @@ void Monitor::win_election(epoch_t epoch, set<int>& active, uint64_t features,
   // when monitors are call elections or participating in a paxos
   // round without agreeing on who the participants are.
   monmon()->election_finished();
-  for (vector<PaxosService*>::iterator p = paxos_service.begin();
-       p != paxos_service.end(); ++p) {
-    if (*p != monmon())
-      (*p)->election_finished();
-  }
+  _finish_svc_election();
   health_monitor->start(epoch);
 
   logger->inc(l_mon_election_win);
@@ -1910,30 +2087,38 @@ void Monitor::win_election(epoch_t epoch, set<int>& active, uint64_t features,
     do_health_to_clog_interval();
     scrub_event_start();
   }
-  collect_sys_info(&metadata[rank], g_ceph_context);
+
+  Metadata my_meta;
+  collect_sys_info(&my_meta, g_ceph_context);
+  my_meta["addr"] = stringify(messenger->get_myaddr());
+  update_mon_metadata(rank, std::move(my_meta));
 }
 
-void Monitor::lose_election(epoch_t epoch, set<int> &q, int l, uint64_t features) 
+void Monitor::lose_election(epoch_t epoch, set<int> &q, int l,
+                            uint64_t features,
+                            const mon_feature_t& mon_features)
 {
   state = STATE_PEON;
   leader_since = utime_t();
   leader = l;
   quorum = q;
   outside_quorum.clear();
-  quorum_features = features;
+  quorum_con_features = features;
+  quorum_mon_features = mon_features;
   dout(10) << "lose_election, epoch " << epoch << " leader is mon" << leader
-	   << " quorum is " << quorum << " features are " << quorum_features << dendl;
+	   << " quorum is " << quorum << " features are " << quorum_con_features
+           << " mon_features are " << quorum_mon_features
+           << dendl;
 
   paxos->peon_init();
-  for (vector<PaxosService*>::iterator p = paxos_service.begin(); p != paxos_service.end(); ++p)
-    (*p)->election_finished();
+  _finish_svc_election();
   health_monitor->start(epoch);
 
   logger->inc(l_mon_election_lose);
 
   finish_election();
 
-  if (quorum_features & CEPH_FEATURE_MON_METADATA) {
+  if (quorum_con_features & CEPH_FEATURE_MON_METADATA) {
     Metadata sys_info;
     collect_sys_info(&sys_info, g_ceph_context);
     messenger->send_message(new MMonMetadata(sys_info),
@@ -1944,6 +2129,7 @@ void Monitor::lose_election(epoch_t epoch, set<int> &q, int l, uint64_t features
 void Monitor::finish_election()
 {
   apply_quorum_to_compatset_features();
+  apply_monmap_to_compatset_features();
   timecheck_finish();
   exited_quorum = utime_t();
   finish_contexts(g_ceph_context, waitfor_quorum);
@@ -1961,32 +2147,64 @@ void Monitor::finish_election()
   }
 }
 
-void Monitor::apply_quorum_to_compatset_features()
+void Monitor::_apply_compatset_features(CompatSet &new_features)
 {
-  CompatSet new_features(features);
-  if (quorum_features & CEPH_FEATURE_OSD_ERASURE_CODES) {
-    new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_OSD_ERASURE_CODES);
-  }
-  if (quorum_features & CEPH_FEATURE_OSDMAP_ENC) {
-    new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_OSDMAP_ENC);
-  }
-  if (quorum_features & CEPH_FEATURE_ERASURE_CODE_PLUGINS_V2) {
-    new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_ERASURE_CODE_PLUGINS_V2);
-  }
-  if (quorum_features & CEPH_FEATURE_ERASURE_CODE_PLUGINS_V3) {
-    new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_ERASURE_CODE_PLUGINS_V3);
-  }
   if (new_features.compare(features) != 0) {
     CompatSet diff = features.unsupported(new_features);
     dout(1) << __func__ << " enabling new quorum features: " << diff << dendl;
     features = new_features;
 
-    MonitorDBStore::TransactionRef t(new MonitorDBStore::Transaction);
+    auto t = std::make_shared<MonitorDBStore::Transaction>();
     write_features(t);
     store->apply_transaction(t);
 
     apply_compatset_features_to_quorum_requirements();
   }
+}
+
+void Monitor::apply_quorum_to_compatset_features()
+{
+  CompatSet new_features(features);
+  if (quorum_con_features & CEPH_FEATURE_OSD_ERASURE_CODES) {
+    new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_OSD_ERASURE_CODES);
+  }
+  if (quorum_con_features & CEPH_FEATURE_OSDMAP_ENC) {
+    new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_OSDMAP_ENC);
+  }
+  if (quorum_con_features & CEPH_FEATURE_ERASURE_CODE_PLUGINS_V2) {
+    new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_ERASURE_CODE_PLUGINS_V2);
+  }
+  if (quorum_con_features & CEPH_FEATURE_ERASURE_CODE_PLUGINS_V3) {
+    new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_ERASURE_CODE_PLUGINS_V3);
+  }
+  dout(5) << __func__ << dendl;
+  _apply_compatset_features(new_features);
+}
+
+void Monitor::apply_monmap_to_compatset_features()
+{
+  CompatSet new_features(features);
+  mon_feature_t monmap_features = monmap->get_required_features();
+
+  /* persistent monmap features may go into the compatset.
+   * optional monmap features may not - why?
+   *   because optional monmap features may be set/unset by the admin,
+   *   and possibly by other means that haven't yet been thought out,
+   *   so we can't make the monitor enforce them on start - because they
+   *   may go away.
+   *   this, of course, does not invalidate setting a compatset feature
+   *   for an optional feature - as long as you make sure to clean it up
+   *   once you unset it.
+   */
+  if (monmap_features.contains_all(ceph::features::mon::FEATURE_KRAKEN)) {
+    assert(ceph::features::mon::get_persistent().contains_all(
+           ceph::features::mon::FEATURE_KRAKEN));
+    // this feature should only ever be set if the quorum supports it.
+    assert(quorum_con_features & CEPH_FEATURE_SERVER_KRAKEN);
+    new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_KRAKEN);
+  }
+  dout(5) << __func__ << dendl;
+  _apply_compatset_features(new_features);
 }
 
 void Monitor::apply_compatset_features_to_quorum_requirements()
@@ -2003,6 +2221,9 @@ void Monitor::apply_compatset_features_to_quorum_requirements()
   }
   if (features.incompat.contains(CEPH_MON_FEATURE_INCOMPAT_ERASURE_CODE_PLUGINS_V3)) {
     required_features |= CEPH_FEATURE_ERASURE_CODE_PLUGINS_V3;
+  }
+  if (features.incompat.contains(CEPH_MON_FEATURE_INCOMPAT_KRAKEN)) {
+    required_features |= CEPH_FEATURE_SERVER_KRAKEN;
   }
   dout(10) << __func__ << " required_features " << required_features << dendl;
 }
@@ -2088,6 +2309,14 @@ void Monitor::get_mon_status(Formatter *f, ostream& ss)
   }
 
   f->close_section(); // quorum
+
+  f->open_object_section("features");
+  f->dump_stream("required_con") << required_features;
+  mon_feature_t req_mon_features = get_required_mon_features();
+  req_mon_features.dump(f, "required_mon");
+  f->dump_stream("quorum_con") << quorum_con_features;
+  quorum_mon_features.dump(f, "quorum_mon");
+  f->close_section(); // features
 
   f->open_array_section("outside_quorum");
   for (set<string>::iterator p = outside_quorum.begin(); p != outside_quorum.end(); ++p)
@@ -2459,7 +2688,11 @@ void Monitor::get_cluster_status(stringstream &ss, Formatter *f)
     pgmon()->pg_map.print_summary(f, NULL);
     f->close_section();
     f->open_object_section("fsmap");
-    mdsmon()->fsmap.print_summary(f, NULL);
+    mdsmon()->get_fsmap().print_summary(f, NULL);
+    f->close_section();
+
+    f->open_object_section("mgrmap");
+    mgrmon()->get_map().print_summary(f, nullptr);
     f->close_section();
     f->close_section();
   } else {
@@ -2469,8 +2702,13 @@ void Monitor::get_cluster_status(stringstream &ss, Formatter *f)
     ss << "     monmap " << *monmap << "\n";
     ss << "            election epoch " << get_epoch()
        << ", quorum " << get_quorum() << " " << get_quorum_names() << "\n";
-    if (mdsmon()->fsmap.any_filesystems()) {
-      ss << "      fsmap " << mdsmon()->fsmap << "\n";
+    if (mdsmon()->get_fsmap().filesystem_count() > 0) {
+      ss << "      fsmap " << mdsmon()->get_fsmap() << "\n";
+    }
+    if (mgrmon()->in_use()) {
+      ss << "        mgr ";
+      mgrmon()->get_map().print_summary(nullptr, &ss);
+      ss << "\n";
     }
 
     osdmon()->osdmap.print_summary(NULL, ss);
@@ -2545,7 +2783,7 @@ void Monitor::format_command_descriptions(const MonCommand *commands,
     secname << "cmd" << setfill('0') << std::setw(3) << cmdnum;
     dump_cmddesc_to_json(f, secname.str(),
 			 cp->cmdstring, cp->helpstring, cp->module,
-			 cp->req_perms, cp->availability);
+			 cp->req_perms, cp->availability, cp->flags);
     cmdnum++;
   }
   f->close_section();	// command_descriptions
@@ -2628,7 +2866,19 @@ void Monitor::handle_command(MonOpRequestRef op)
     return;
   }
 
-  cmd_getval(g_ceph_context, cmdmap, "prefix", prefix);
+  // check return value. If no prefix parameter provided,
+  // return value will be false, then return error info.
+  if(!cmd_getval(g_ceph_context, cmdmap, "prefix", prefix)) {
+    reply_command(op, -EINVAL, "command prefix not found", 0);
+    return;
+  }
+
+  // check prefix is empty
+  if (prefix.empty()) {
+    reply_command(op, -EINVAL, "command prefix must not be empty", 0);
+    return;
+  }
+
   if (prefix == "get_command_descriptions") {
     bufferlist rdata;
     Formatter *f = Formatter::create("json");
@@ -2649,6 +2899,15 @@ void Monitor::handle_command(MonOpRequestRef op)
   boost::scoped_ptr<Formatter> f(Formatter::create(format));
 
   get_str_vec(prefix, fullcmd);
+
+  // make sure fullcmd is not empty.
+  // invalid prefix will cause empty vector fullcmd.
+  // such as, prefix=";,,;"
+  if (fullcmd.empty()) {
+    reply_command(op, -EINVAL, "command requires a prefix to be valid", 0);
+    return;
+  }
+
   module = fullcmd[0];
 
   // validate command is in leader map
@@ -2775,6 +3034,11 @@ void Monitor::handle_command(MonOpRequestRef op)
     return;
   }
 
+  if (module == "mgr") {
+    mgrmon()->dispatch(op);
+    return;
+  }
+
   if (prefix == "fsid") {
     if (f) {
       f->open_object_section("fsid");
@@ -2869,10 +3133,10 @@ void Monitor::handle_command(MonOpRequestRef op)
       if (f)
         f->open_object_section("stats");
 
-      pgmon()->dump_fs_stats(ds, f.get(), verbose);
+      pgmon()->pg_map.dump_fs_stats(&ds, f.get(), verbose);
       if (!f)
         ds << '\n';
-      pgmon()->dump_pool_stats(ds, f.get(), verbose);
+      pgmon()->pg_map.dump_pool_stats(osdmon()->osdmap, &ds, f.get(), verbose);
 
       if (f) {
         f->close_section();
@@ -2945,19 +3209,46 @@ void Monitor::handle_command(MonOpRequestRef op)
     rs = "";
     r = 0;
   } else if (prefix == "mon metadata") {
-    string name;
-    cmd_getval(g_ceph_context, cmdmap, "id", name);
-    int mon = monmap->get_rank(name);
-    if (mon < 0) {
-      rs = "requested mon not found";
-      r = -ENOENT;
-      goto out;
-    }
     if (!f)
       f.reset(Formatter::create("json-pretty"));
-    f->open_object_section("mon_metadata");
-    r = get_mon_metadata(mon, f.get(), ds);
-    f->close_section();
+
+    string name;
+    bool all = !cmd_getval(g_ceph_context, cmdmap, "id", name);
+    if (!all) {
+      // Dump a single mon's metadata
+      int mon = monmap->get_rank(name);
+      if (mon < 0) {
+        rs = "requested mon not found";
+        r = -ENOENT;
+        goto out;
+      }
+      f->open_object_section("mon_metadata");
+      r = get_mon_metadata(mon, f.get(), ds);
+      f->close_section();
+    } else {
+      // Dump all mons' metadata
+      r = 0;
+      f->open_array_section("mon_metadata");
+      for (unsigned int rank = 0; rank < monmap->size(); ++rank) {
+        std::ostringstream get_err;
+        f->open_object_section("mon");
+        f->dump_string("name", monmap->get_name(rank));
+        r = get_mon_metadata(rank, f.get(), get_err);
+        f->close_section();
+        if (r == -ENOENT || r == -EINVAL) {
+          dout(1) << get_err.str() << dendl;
+          // Drop error, list what metadata we do have
+          r = 0;
+        } else if (r != 0) {
+          derr << "Unexpected error from get_mon_metadata: "
+               << cpp_strerror(r) << dendl;
+          ds << get_err.str();
+          break;
+        }
+      }
+      f->close_section();
+    }
+
     f->flush(ds);
     rdata.append(ds);
     rs = "";
@@ -3202,7 +3493,7 @@ void Monitor::try_send_message(Message *m, const entity_inst_t& to)
   dout(10) << "try_send_message " << *m << " to " << to << dendl;
 
   bufferlist bl;
-  encode_message(m, quorum_features, bl);
+  encode_message(m, quorum_con_features, bl);
 
   messenger->send_message(m, to);
 
@@ -3560,6 +3851,7 @@ void Monitor::dispatch_op(MonOpRequestRef op)
 
     // OSDs
     case CEPH_MSG_MON_GET_OSDMAP:
+    case CEPH_MSG_POOLOP:
     case MSG_OSD_MARK_ME_DOWN:
     case MSG_OSD_FAILURE:
     case MSG_OSD_BOOT:
@@ -3575,16 +3867,16 @@ void Monitor::dispatch_op(MonOpRequestRef op)
       paxos_service[PAXOS_MDSMAP]->dispatch(op);
       break;
 
+    // Mgrs
+    case MSG_MGR_BEACON:
+      paxos_service[PAXOS_MGR]->dispatch(op);
+      break;
 
     // pg
     case CEPH_MSG_STATFS:
     case MSG_PGSTATS:
     case MSG_GETPOOLSTATS:
       paxos_service[PAXOS_PGMAP]->dispatch(op);
-      break;
-
-    case CEPH_MSG_POOLOP:
-      paxos_service[PAXOS_OSDMAP]->dispatch(op);
       break;
 
     // log
@@ -3682,8 +3974,7 @@ void Monitor::dispatch_op(MonOpRequestRef op)
       {
         op->set_type_paxos();
         MMonPaxos *pm = static_cast<MMonPaxos*>(op->get_req());
-        if (!op->is_src_mon() ||
-            !op->get_session()->is_capable("mon", MON_CAP_X)) {
+        if (!op->get_session()->is_capable("mon", MON_CAP_X)) {
           //can't send these!
           break;
         }
@@ -4242,7 +4533,7 @@ void Monitor::handle_subscribe(MonOpRequestRef op)
 			       p->second.flags & CEPH_SUBSCRIBE_ONETIME,
 			       m->get_connection()->has_feature(CEPH_FEATURE_INCSUBOSDMAP));
 
-    if (p->first.find("mdsmap") == 0 || p->first == "fsmap") {
+    if (p->first.compare(0, 6, "mdsmap") == 0 || p->first.compare(0, 5, "fsmap") == 0) {
       dout(10) << __func__ << ": MDS sub '" << p->first << "'" << dendl;
       if ((int)s->is_capable("mds", MON_CAP_R)) {
         Subscription *sub = s->sub_map[p->first];
@@ -4262,9 +4553,11 @@ void Monitor::handle_subscribe(MonOpRequestRef op)
 	pgmon()->check_sub(s->sub_map["osd_pg_creates"]);
       }
     } else if (p->first == "monmap") {
-      check_sub(s->sub_map["monmap"]);
+      monmon()->check_sub(s->sub_map[p->first]);
     } else if (logmon()->sub_name_to_id(p->first) >= 0) {
       logmon()->check_sub(s->sub_map[p->first]);
+    } else if (p->first == "mgrmap" || p->first == "mgrdigest") {
+      mgrmon()->check_sub(s->sub_map[p->first]);
     }
   }
 
@@ -4351,31 +4644,12 @@ bool Monitor::ms_handle_reset(Connection *con)
   return true;
 }
 
-void Monitor::check_subs()
+bool Monitor::ms_handle_refused(Connection *con)
 {
-  string type = "monmap";
-  if (session_map.subs.count(type) == 0)
-    return;
-  xlist<Subscription*>::iterator p = session_map.subs[type]->begin();
-  while (!p.end()) {
-    Subscription *sub = *p;
-    ++p;
-    check_sub(sub);
-  }
+  // just log for now...
+  dout(10) << "ms_handle_refused " << con << " " << con->get_peer_addr() << dendl;
+  return false;
 }
-
-void Monitor::check_sub(Subscription *sub)
-{
-  dout(10) << "check_sub monmap next " << sub->next << " have " << monmap->get_epoch() << dendl;
-  if (sub->next <= monmap->get_epoch()) {
-    send_latest_monmap(sub->session->con.get());
-    if (sub->onetime)
-      session_map.remove_sub(sub);
-    else
-      sub->next = monmap->get_epoch() + 1;
-  }
-}
-
 
 // -----
 
@@ -4398,13 +4672,13 @@ void Monitor::handle_mon_metadata(MonOpRequestRef op)
   MMonMetadata *m = static_cast<MMonMetadata*>(op->get_req());
   if (is_leader()) {
     dout(10) << __func__ << dendl;
-    update_mon_metadata(m->get_source().num(), m->data);
+    update_mon_metadata(m->get_source().num(), std::move(m->data));
   }
 }
 
-void Monitor::update_mon_metadata(int from, const Metadata& m)
+void Monitor::update_mon_metadata(int from, Metadata&& m)
 {
-  metadata[from] = m;
+  pending_metadata.insert(make_pair(from, std::move(m)));
 
   bufferlist bl;
   int err = store->get(MONITOR_STORE_PREFIX, "last_metadata", bl);
@@ -4412,12 +4686,12 @@ void Monitor::update_mon_metadata(int from, const Metadata& m)
   if (!err) {
     bufferlist::iterator iter = bl.begin();
     ::decode(last_metadata, iter);
-    metadata.insert(last_metadata.begin(), last_metadata.end());
+    pending_metadata.insert(last_metadata.begin(), last_metadata.end());
   }
 
   MonitorDBStore::TransactionRef t = paxos->get_pending_transaction();
   bl.clear();
-  ::encode(metadata, bl);
+  ::encode(pending_metadata, bl);
   t->put(MONITOR_STORE_PREFIX, "last_metadata", bl);
   paxos->trigger_propose();
 }
@@ -4737,6 +5011,14 @@ void Monitor::scrub_event_start()
     return;
   }
 
+  struct C_Scrub : public Context {
+    Monitor *mon;
+    explicit C_Scrub(Monitor *m) : mon(m) { }
+    void finish(int r) {
+      mon->scrub_start();
+    }
+  };
+
   scrub_event = new C_Scrub(this);
   timer.add_event_after(cct->_conf->mon_scrub_interval, scrub_event);
 }
@@ -4762,6 +5044,15 @@ void Monitor::scrub_reset_timeout()
 {
   dout(15) << __func__ << " reset timeout event" << dendl;
   scrub_cancel_timeout();
+
+  struct C_ScrubTimeout : public Context {
+    Monitor *mon;
+    explicit C_ScrubTimeout(Monitor *m) : mon(m) { }
+    void finish(int r) {
+      mon->scrub_timeout();
+    }
+  };
+
   scrub_timeout_event = new C_ScrubTimeout(this);
   timer.add_event_after(g_conf->mon_scrub_timeout, scrub_timeout_event);
 }
@@ -4891,8 +5182,8 @@ int Monitor::check_fsid()
 int Monitor::write_fsid()
 {
   MonitorDBStore::TransactionRef t(new MonitorDBStore::Transaction);
-  int r = write_fsid(t);
-  store->apply_transaction(t);
+  write_fsid(t);
+  int r = store->apply_transaction(t);
   return r;
 }
 

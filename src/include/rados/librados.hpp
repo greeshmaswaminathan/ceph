@@ -278,6 +278,8 @@ namespace librados
     // marked full; ops will either succeed (e.g., delete) or return
     // EDQUOT or ENOSPC
     OPERATION_FULL_TRY           = LIBRADOS_OPERATION_FULL_TRY,
+    //mainly for delete
+    OPERATION_FULL_FORCE	 = LIBRADOS_OPERATION_FULL_FORCE,
   };
 
   /*
@@ -292,6 +294,8 @@ namespace librados
     ALLOC_HINT_FLAG_IMMUTABLE = 32,
     ALLOC_HINT_FLAG_SHORTLIVED = 64,
     ALLOC_HINT_FLAG_LONGLIVED = 128,
+    ALLOC_HINT_FLAG_COMPRESSIBLE = 256,
+    ALLOC_HINT_FLAG_INCOMPRESSIBLE = 512,
   };
 
   /*
@@ -391,6 +395,7 @@ namespace librados
     void zero(uint64_t off, uint64_t len);
     void rmxattr(const char *name);
     void setxattr(const char *name, const bufferlist& bl);
+    void setxattr(const char *name, const bufferlist&& bl);
     void tmap_update(const bufferlist& cmdbl);
     void tmap_put(const bufferlist& bl);
     void clone_range(uint64_t dst_off,
@@ -947,6 +952,7 @@ namespace librados
      * other than SNAP_HEAD
      */
     int aio_remove(const std::string& oid, AioCompletion *c);
+    int aio_remove(const std::string& oid, AioCompletion *c, int flags);
 
     /**
      * Wait for all currently pending aio writes to be safe.
@@ -964,7 +970,10 @@ namespace librados
      * @returns 0 on success, negative error code on failure
      */
     int aio_flush_async(AioCompletion *c);
-
+    int aio_getxattr(const std::string& oid, AioCompletion *c, const char *name, bufferlist& bl);
+    int aio_getxattrs(const std::string& oid, AioCompletion *c, std::map<std::string, bufferlist>& attrset);
+    int aio_setxattr(const std::string& oid, AioCompletion *c, const char *name, bufferlist& bl);
+    int aio_rmxattr(const std::string& oid, AioCompletion *c, const char *name);
     int aio_stat(const std::string& oid, AioCompletion *c, uint64_t *psize, time_t *pmtime);
     int aio_stat2(const std::string& oid, AioCompletion *c, uint64_t *psize, struct timespec *pts);
 
@@ -978,6 +987,12 @@ namespace librados
 
     int aio_exec(const std::string& oid, AioCompletion *c, const char *cls, const char *method,
 	         bufferlist& inbl, bufferlist *outbl);
+
+    /*
+     * asynchronous version of unlock
+     */
+    int aio_unlock(const std::string &oid, const std::string &name,
+	           const std::string &cookie, AioCompletion *c);
 
     // compound object operations
     int operate(const std::string& oid, ObjectWriteOperation *op);
@@ -1016,8 +1031,12 @@ namespace librados
     // watch/notify
     int watch2(const std::string& o, uint64_t *handle,
 	       librados::WatchCtx2 *ctx);
+    int watch3(const std::string& o, uint64_t *handle,
+	       librados::WatchCtx2 *ctx, uint32_t timeout);
     int aio_watch(const std::string& o, AioCompletion *c, uint64_t *handle,
 	       librados::WatchCtx2 *ctx);
+    int aio_watch2(const std::string& o, AioCompletion *c, uint64_t *handle,
+	       librados::WatchCtx2 *ctx, uint32_t timeout);
     int unwatch2(uint64_t handle);
     int aio_unwatch(uint64_t handle, AioCompletion *c);
     /**
@@ -1118,7 +1137,7 @@ namespace librados
     int cache_pin(const std::string& o);
     int cache_unpin(const std::string& o);
 
-    const std::string& get_pool_name() const;
+    std::string get_pool_name() const;
 
     void locator_set_key(const std::string& key);
     void set_namespace(const std::string& nspace);
@@ -1200,6 +1219,8 @@ namespace librados
 
     int mon_command(std::string cmd, const bufferlist& inbl,
 		    bufferlist *outbl, std::string *outs);
+    int mgr_command(std::string cmd, const bufferlist& inbl,
+		    bufferlist *outbl, std::string *outs);
     int osd_command(int osdid, std::string cmd, const bufferlist& inbl,
                     bufferlist *outbl, std::string *outs);
     int pg_command(const char *pgstr, std::string cmd, const bufferlist& inbl,
@@ -1211,7 +1232,7 @@ namespace librados
     // Features useful for test cases
     void test_blacklist_self(bool set);
 
-    /* listing objects */
+    /* pool info */
     int pool_list(std::list<std::string>& v);
     int pool_list2(std::list<std::pair<int64_t, std::string> >& v);
     int get_pool_stats(std::list<std::string>& v,
@@ -1223,6 +1244,9 @@ namespace librados
     int get_pool_stats(std::list<std::string>& v,
                        std::string& category,
 		       std::map<std::string, stats_map>& stats);
+    /// check if pool has selfmanaged snaps
+    bool get_pool_is_selfmanaged_snaps_mode(const std::string& poolname);
+
     int cluster_stat(cluster_stat_t& result);
     int cluster_fsid(std::string *fsid);
 

@@ -109,7 +109,7 @@ public:
   /*** recovery ***/
   /* replay() - replay given event.  this is idempotent.
    */
-  virtual void replay(MDSRank *m) { assert(0); }
+  virtual void replay(MDSRank *m) { ceph_abort(); }
 
   /**
    * If the subclass embeds a MetaBlob, return it here so that
@@ -118,7 +118,7 @@ public:
   virtual EMetaBlob *get_metablob() { return NULL; }
 };
 
-inline ostream& operator<<(ostream& out, LogEvent& le) {
+inline ostream& operator<<(ostream& out, const LogEvent &le) {
   le.print(out);
   return out;
 }

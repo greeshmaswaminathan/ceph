@@ -3,16 +3,17 @@ import functools
 import socket
 import os
 import time
+import sys
 
 from nose import with_setup, SkipTest
-from nose.tools import eq_ as eq, assert_raises
+from nose.tools import eq_ as eq, assert_raises, assert_not_equal
 from rados import (Rados,
                    LIBRADOS_OP_FLAG_FADVISE_DONTNEED,
                    LIBRADOS_OP_FLAG_FADVISE_NOCACHE,
                    LIBRADOS_OP_FLAG_FADVISE_RANDOM)
 from rbd import (RBD, Image, ImageNotFound, InvalidArgument, ImageExists,
                  ImageBusy, ImageHasSnapshots, ReadOnlyImage,
-                 FunctionNotSupported, ArgumentOutOfRange,
+                 FunctionNotSupported, ArgumentOutOfRange, DiskQuotaExceeded,
                  RBD_FEATURE_LAYERING, RBD_FEATURE_STRIPINGV2,
                  RBD_FEATURE_EXCLUSIVE_LOCK, RBD_FEATURE_JOURNALING,
                  RBD_MIRROR_MODE_DISABLED, RBD_MIRROR_MODE_IMAGE,
@@ -44,7 +45,7 @@ def setup_module():
 
 def teardown_module():
     global ioctx
-    ioctx.__del__()
+    ioctx.close()
     global rados
     rados.delete_pool(pool_name)
     rados.shutdown()
@@ -132,6 +133,10 @@ def check_default_params(format, order=None, features=None, stripe_count=None,
             rados.conf_set('rbd_default_stripe_count', str(stripe_count or 0))
         if stripe_unit is not None:
             rados.conf_set('rbd_default_stripe_unit', str(stripe_unit or 0))
+        feature_data_pool = 0
+        datapool = rados.conf_get('rbd_default_data_pool')
+        if not len(datapool) == 0:
+            feature_data_pool = 128
         image_name = get_temp_image_name()
         if exception is None:
             RBD().create(ioctx, image_name, IMG_SIZE)
@@ -144,8 +149,12 @@ def check_default_params(format, order=None, features=None, stripe_count=None,
                     eq(expected_order, actual_order)
 
                     expected_features = features
-                    if expected_features is None or format == 1:
-                        expected_features = 0 if format == 1 else 61
+                    if format == 1:
+                        expected_features = 0
+                    elif expected_features is None:
+                        expected_features = 61 | feature_data_pool
+                    else:
+                        expected_features |= feature_data_pool
                     eq(expected_features, image.features())
 
                     expected_stripe_count = stripe_count
@@ -190,14 +199,14 @@ def test_create_defaults():
     check_default_params(2, 20, RBD_FEATURE_STRIPINGV2, 1, 1 << 16)
     check_default_params(2, 20, RBD_FEATURE_STRIPINGV2, 10, 1 << 20)
     check_default_params(2, 20, RBD_FEATURE_STRIPINGV2, 10, 1 << 16)
-    check_default_params(2, 20, RBD_FEATURE_STRIPINGV2, 0, 0)
+    check_default_params(2, 20, 0, 0, 0)
     # make sure invalid combinations of stripe unit and order are still invalid
     check_default_params(2, 22, RBD_FEATURE_STRIPINGV2, 10, 1 << 50, exception=InvalidArgument)
     check_default_params(2, 22, RBD_FEATURE_STRIPINGV2, 10, 100, exception=InvalidArgument)
     check_default_params(2, 22, RBD_FEATURE_STRIPINGV2, 0, 1, exception=InvalidArgument)
     check_default_params(2, 22, RBD_FEATURE_STRIPINGV2, 1, 0, exception=InvalidArgument)
     # 0 stripe unit and count are still ignored
-    check_default_params(2, 22, RBD_FEATURE_STRIPINGV2, 0, 0)
+    check_default_params(2, 22, 0, 0, 0)
 
 def test_context_manager():
     with Rados(conffile='') as cluster:
@@ -289,6 +298,7 @@ class TestImage(object):
     def tearDown(self):
         self.image.close()
         remove_image()
+        self.image = None
 
     @require_new_format()
     @blacklist_features([RBD_FEATURE_EXCLUSIVE_LOCK])
@@ -314,6 +324,13 @@ class TestImage(object):
         eq(image.stripe_count(), stripe_count)
         image.close()
         RBD().remove(ioctx, image_name)
+
+    @require_new_format()
+    def test_id(self):
+        assert_not_equal(b'', self.image.id())
+
+    def test_block_name_prefix(self):
+        assert_not_equal(b'', self.image.block_name_prefix())
 
     def test_invalidate_cache(self):
         self.image.write(b'abc', 0)
@@ -504,6 +521,19 @@ class TestImage(object):
         self.image.remove_snap('snap1')
         assert_raises(ImageNotFound, self.image.unprotect_snap, 'snap1')
         assert_raises(ImageNotFound, self.image.is_protected_snap, 'snap1')
+
+    def test_limit_snaps(self):
+        self.image.set_snap_limit(2)
+        eq(2, self.image.get_snap_limit())
+        self.image.create_snap('snap1')
+        self.image.create_snap('snap2')
+        assert_raises(DiskQuotaExceeded, self.image.create_snap, 'snap3')
+        self.image.remove_snap_limit()
+        self.image.create_snap('snap3')
+
+        self.image.remove_snap('snap1')
+        self.image.remove_snap('snap2')
+        self.image.remove_snap('snap3')
 
     @require_features([RBD_FEATURE_EXCLUSIVE_LOCK])
     def test_remove_with_exclusive_lock(self):
@@ -717,6 +747,65 @@ class TestImage(object):
         self.image.remove_snap('snap1')
         self.image.remove_snap('snap2')
 
+    def test_aio_read(self):
+        # this is a list so that the local cb() can modify it
+        retval = [None]
+        def cb(_, buf):
+            retval[0] = buf
+
+        # test1: success case
+        comp = self.image.aio_read(0, 20, cb)
+        comp.wait_for_complete_and_cb()
+        eq(retval[0], b'\0' * 20)
+        eq(comp.get_return_value(), 20)
+        eq(sys.getrefcount(comp), 2)
+
+        # test2: error case
+        retval[0] = 1
+        comp = self.image.aio_read(IMG_SIZE, 20, cb)
+        comp.wait_for_complete_and_cb()
+        eq(None, retval[0])
+        assert(comp.get_return_value() < 0)
+        eq(sys.getrefcount(comp), 2)
+
+    def test_aio_write(self):
+        retval = [None]
+        def cb(comp):
+            retval[0] = comp.get_return_value()
+
+        data = rand_data(256)
+        comp = self.image.aio_write(data, 256, cb)
+        comp.wait_for_complete_and_cb()
+        eq(retval[0], 0)
+        eq(comp.get_return_value(), 0)
+        eq(sys.getrefcount(comp), 2)
+        eq(self.image.read(256, 256), data)
+
+    def test_aio_discard(self):
+        retval = [None]
+        def cb(comp):
+            retval[0] = comp.get_return_value()
+
+        data = rand_data(256)
+        self.image.write(data, 0)
+        comp = self.image.aio_discard(0, 256, cb)
+        comp.wait_for_complete_and_cb()
+        eq(retval[0], 0)
+        eq(comp.get_return_value(), 0)
+        eq(sys.getrefcount(comp), 2)
+        eq(self.image.read(256, 256), b'\0' * 256)
+
+    def test_aio_flush(self):
+        retval = [None]
+        def cb(comp):
+            retval[0] = comp.get_return_value()
+
+        comp = self.image.aio_flush(cb)
+        comp.wait_for_complete_and_cb()
+        eq(retval[0], 0)
+        eq(sys.getrefcount(comp), 2)
+
+
 
 def check_diff(image, offset, length, from_snapshot, expected):
     extents = []
@@ -753,18 +842,42 @@ class TestClone(object):
         self.image.close()
         remove_image()
 
-    @require_features([RBD_FEATURE_STRIPINGV2])
-    def test_with_params(self):
-        global features
+    def _test_with_params(self, features=None, order=None, stripe_unit=None,
+                          stripe_count=None):
         self.image.create_snap('snap2')
         self.image.protect_snap('snap2')
         clone_name2 = get_temp_image_name()
-        self.rbd.clone(ioctx, image_name, 'snap2', ioctx, clone_name2,
-                       features, self.image.stat()['order'],
-                       self.image.stripe_unit(), self.image.stripe_count())
+        if features is None:
+            self.rbd.clone(ioctx, image_name, 'snap2', ioctx, clone_name2)
+        elif order is None:
+            self.rbd.clone(ioctx, image_name, 'snap2', ioctx, clone_name2,
+                           features)
+        elif stripe_unit is None:
+            self.rbd.clone(ioctx, image_name, 'snap2', ioctx, clone_name2,
+                           features, order)
+        elif stripe_count is None:
+            self.rbd.clone(ioctx, image_name, 'snap2', ioctx, clone_name2,
+                           features, order, stripe_unit)
+        else:
+            self.rbd.clone(ioctx, image_name, 'snap2', ioctx, clone_name2,
+                           features, order, stripe_unit, stripe_count)
         self.rbd.remove(ioctx, clone_name2)
         self.image.unprotect_snap('snap2')
         self.image.remove_snap('snap2')
+
+    def test_with_params(self):
+        self._test_with_params()
+
+    def test_with_params2(self):
+        global features
+        self._test_with_params(features, self.image.stat()['order'])
+
+    @require_features([RBD_FEATURE_STRIPINGV2])
+    def test_with_params3(self):
+        global features
+        self._test_with_params(features, self.image.stat()['order'],
+                               self.image.stripe_unit(),
+                               self.image.stripe_count())
 
     def test_unprotected(self):
         self.image.create_snap('snap2')
@@ -1025,7 +1138,7 @@ class TestExclusiveLock(object):
     def tearDown(self):
         remove_image()
         global ioctx2
-        ioctx2.__del__()
+        ioctx2.close()
         global rados2
         rados2.shutdown()
 
@@ -1107,6 +1220,7 @@ class TestExclusiveLock(object):
                 image1.remove_snap('snap')
 
     def test_follower_discard(self):
+        global rados
         with Image(ioctx, image_name) as image1, Image(ioctx2, image_name) as image2:
             data = rand_data(256)
             image1.write(data, 0)
@@ -1114,7 +1228,10 @@ class TestExclusiveLock(object):
             eq(image1.is_exclusive_lock_owner(), False)
             eq(image2.is_exclusive_lock_owner(), True)
             read = image2.read(0, 256)
-            eq(256 * b'\0', read)
+            if rados.conf_get('rbd_skip_partial_discard') == 'false':
+                eq(256 * b'\0', read)
+            else:
+                eq(data, read)
 
     def test_follower_write(self):
         with Image(ioctx, image_name) as image1, Image(ioctx2, image_name) as image2:
