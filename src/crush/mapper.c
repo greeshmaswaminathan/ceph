@@ -23,6 +23,7 @@
 # include "hash.h"
 #endif
 #include "crush_ln_table.h"
+#include "builder.h"
 
 #define dprintk(args...) /* printf(args) */
 
@@ -343,7 +344,7 @@ static int bucket_straw2_choose(struct crush_bucket_straw2 *bucket,
 
 static int crush_bucket_choose(struct crush_bucket *in, int x, int r)
 {
-	dprintk(" crush_bucket_choose %d x=%d r=%d\n", in->id, x, r);
+	printf(" crush_bucket_choose %d x=%d r=%d\n", in->id, x, r);
 	BUG_ON(in->size == 0);
 	switch (in->alg) {
 	case CRUSH_BUCKET_UNIFORM:
@@ -428,12 +429,15 @@ static int crush_choose_firstn(const struct crush_map *map,
 	unsigned int ftotal, flocal;
 	int retry_descent, retry_bucket, skip_rep;
 	struct crush_bucket *in = bucket;
+	struct crush_bucket* temp = bucket;
+	struct crush_bucket* original = bucket; 
 	int r;
 	int i;
 	int item = 0;
 	int itemtype;
 	int collide, reject;
 	int count = out_size;
+        int index = 0;        
 
 	dprintk("CHOOSE%s bucket %d x %d outpos %d numrep %d tries %d \
 recurse_tries %d local_retries %d local_fallback_retries %d \
@@ -442,9 +446,8 @@ parent_r %d stable %d\n",
 		bucket->id, x, outpos, numrep,
 		tries, recurse_tries, local_retries, local_fallback_retries,
 		parent_r, stable);
-
 	for (rep = stable ? 0 : outpos; rep < numrep && count > 0 ; rep++) {
-		/* keep trying until we get a non-out, non-colliding item */
+		printf ("replica %d, outpos %d , out_size %d,  type %d  , x %d , parent_r %d \n",  rep , outpos , out_size , type, x, parent_r);
 		ftotal = 0;
 		skip_rep = 0;
 		do {
@@ -465,12 +468,39 @@ parent_r %d stable %d\n",
 					reject = 1;
 					goto reject;
 				}
+				/********** Color ************/
+				printf(" first item in in %d \n",in -> items[0]);
+				printf("type of in bucket %d ", in->type);
+				if(in->items[0] > 0) {
+                 
+                        		struct crush_map *map1 = map;
+                        		int t_weights[in->size];
+                        		for(index = 0; index < in->size; index++){
+                                		t_weights[index] = in->weight;
+                        		}	
+                        		int newSize = 0;
+                        		int newItems[in->size];
+                        		for(index = 0; index < in->size; index++){
+                                		int item = in->items[index];
+                                		if(item % 4 == ((out_size - rep - 1))){
+                                        		newItems[newSize] = item;
+                                        		newSize++;
+                                		}
+                        		}		
+					printf("filtering items to have only mod %d ", out_size - rep - 1);
+                        		temp = crush_make_bucket(map1, in->alg, in->hash, in->type, newSize, newItems, t_weights);
+                        		temp->id = in->id;
+                        	
+                        		
+                		}else{
+					temp = in;
+				}
 				if (local_fallback_retries > 0 &&
 				    flocal >= (in->size>>1) &&
 				    flocal > local_fallback_retries)
-					item = bucket_perm_choose(in, x, r);
+					item = bucket_perm_choose(temp, x, r);
 				else
-					item = crush_bucket_choose(in, x, r);
+					item = crush_bucket_choose(temp, x, r);
 				if (item >= map->max_devices) {
 					dprintk("   bad item %d\n", item);
 					skip_rep = 1;
@@ -482,7 +512,7 @@ parent_r %d stable %d\n",
 					itemtype = map->buckets[-1-item]->type;
 				else
 					itemtype = 0;
-				dprintk("  item %d type %d\n", item, itemtype);
+				printf("  item %d type %d\n", item, itemtype);
 
 				/* keep going? */
 				if (itemtype != type) {
@@ -575,7 +605,7 @@ reject:
 			continue;
 		}
 
-		dprintk("CHOOSE got %d\n", item);
+		printf("CHOOSE got %d\n", item);
 		out[outpos] = item;
 		outpos++;
 		count--;
