@@ -5,6 +5,7 @@
 # include <linux/types.h>
 #else
 # include "crush_compat.h"
+#include "uthash.h"
 #endif
 
 /*
@@ -75,6 +76,7 @@ enum {
  * Given a ruleset and size of output set, we search through the
  * rule list for a matching rule_mask.
  */
+
 struct crush_rule_mask {
 	__u8 ruleset;
 	__u8 type;
@@ -126,6 +128,12 @@ extern const char *crush_bucket_alg_name(int alg);
 		(1 << CRUSH_BUCKET_LIST) |	\
 		(1 << CRUSH_BUCKET_STRAW))
 
+struct crush_item_color {
+	 __s32 item;
+	 __u32 color;
+	 UT_hash_handle hh;
+};
+
 struct crush_bucket {
 	__s32 id;        /* this'll be negative */
 	__u16 type;      /* non-zero; type=0 is reserved for devices */
@@ -134,8 +142,9 @@ struct crush_bucket {
 	__u32 weight;    /* 16-bit fixed point */
 	__u32 size;      /* num items */
 	__s32 *items;
-
+	struct crush_item_color *item_color_map; /* Only used for buckets having devices */
 };
+
 
 struct crush_bucket_uniform {
 	struct crush_bucket h;

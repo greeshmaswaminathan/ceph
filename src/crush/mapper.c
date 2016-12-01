@@ -25,6 +25,7 @@
 #include "crush_ln_table.h"
 #include "builder.h"
 #include "mapper.h"
+#include "uthash.h"
 
 #define dprintk(args...) /* printf(args) */
 
@@ -343,7 +344,7 @@ static int bucket_straw2_choose(const struct crush_bucket_straw2 *bucket,
 			high_draw = draw;
 		}
 	}
-
+	//printf("\n Returning item %d ", bucket->h.items[high]);
 	return bucket->h.items[high];
 }
 
@@ -352,7 +353,7 @@ static int crush_bucket_choose(const struct crush_bucket *in,
 			       struct crush_work_bucket *work,
 			       int x, int r)
 {
-	printf(" crush_bucket_choose %d x=%d r=%d\n", in->id, x, r);
+	//printf(" crush_bucket_choose %d x=%d r=%d\n", in->id, x, r);
 	BUG_ON(in->size == 0);
 	switch (in->alg) {
 	case CRUSH_BUCKET_UNIFORM:
@@ -434,14 +435,13 @@ static int crush_choose_firstn(const struct crush_map *map,
 			       unsigned int vary_r,
 			       unsigned int stable,
 			       int *out2,
-			       int parent_r)
+			       int parent_r, __u64 used_colors)
 {
 	int rep;
 	unsigned int ftotal, flocal;
 	int retry_descent, retry_bucket, skip_rep;
 	struct crush_bucket *in = bucket;
-	struct crush_bucket* temp = bucket;
-	struct crush_bucket* original = bucket; 
+	struct crush_bucket *temp = NULL;
 	int r;
 	int i;
 	int item = 0;
@@ -458,7 +458,6 @@ parent_r %d stable %d\n",
 		tries, recurse_tries, local_retries, local_fallback_retries,
 		parent_r, stable);
 	for (rep = stable ? 0 : outpos; rep < numrep && count > 0 ; rep++) {
-		printf ("replica %d, outpos %d , out_size %d,  type %d  , x %d , parent_r %d \n",  rep , outpos , out_size , type, x, parent_r);
 		ftotal = 0;
 		skip_rep = 0;
 		do {
@@ -480,11 +479,9 @@ parent_r %d stable %d\n",
 					goto reject;
 				}
 				/********** Color ************/
-				printf(" first item in in %d \n",in -> items[0]);
-				printf("type of in bucket %d ", in->type);
-				if(in->items[0] > 0) {
-                 
-                        		struct crush_map *map1 = map;
+				if(in->items[0] >= 0) {
+    					//printf("Color of item %d is %d ",s->item, s->color);
+   	                     		struct crush_map *map1 = map;
                         		int t_weights[in->size];
                         		for(index = 0; index < in->size; index++){
                                 		t_weights[index] = in->weight;
@@ -493,17 +490,21 @@ parent_r %d stable %d\n",
                         		int newItems[in->size];
                         		for(index = 0; index < in->size; index++){
                                 		int item = in->items[index];
-                                		if(item % 4 == ((out_size - rep - 1))){
+						int color = get_color(in, item);
+						//if(item == 15)
+						//printf("\n &&&&& Color of item %d is %d and verdict %d",item, color, ((1U << color) & used_colors));
+                                		if(((1U << color)  & used_colors) == 0){
                                         		newItems[newSize] = item;
                                         		newSize++;
                                 		}
                         		}		
-					printf("filtering items to have only mod %d ", out_size - rep - 1);
+					//printf("filtering items to have only mod %d ", out_size - rep - 1);
                         		temp = crush_make_bucket(map1, in->alg, in->hash, in->type, newSize, newItems, t_weights);
                         		temp->id = in->id;
                         	
                         		
                 		}else{
+					//printf("No filtering item[0] is not a device %d ",in->items[0]);
 					temp = in;
 				}
 				if (local_fallback_retries > 0 &&
@@ -527,7 +528,6 @@ parent_r %d stable %d\n",
 					itemtype = map->buckets[-1-item]->type;
 				else
 					itemtype = 0;
-				printf("  item %d type %d\n", item, itemtype);
 
 				/* keep going? */
 				if (itemtype != type) {
@@ -572,13 +572,13 @@ parent_r %d stable %d\n",
 							    vary_r,
 							    stable,
 							    NULL,
-							    sub_r) <= outpos)
+							    sub_r,used_colors) <= outpos)
 							/* didn't get leaf */
 							reject = 1;
 					} else {
 						/* we already have a leaf! */
 						out2[outpos] = item;
-		}
+					}
 				}
 
 				if (!reject) {
@@ -622,7 +622,9 @@ reject:
 			continue;
 		}
 
-		printf("CHOOSE got %d\n", item);
+		if(item >= 0 ){
+			used_colors |= (1U << get_color(in, item));	
+		}
 		out[outpos] = item;
 		outpos++;
 		count--;
@@ -888,6 +890,7 @@ int crush_do_rule(const struct crush_map *map,
 		  const __u32 *weight, int weight_max,
 		  void *cwin)
 {
+	//printf(" working_size %d \n" , map->working_size);
 	int result_len;
 	struct crush_work *cw = cwin;
 	int *a = (int *)((char *)cw + map->working_size);
@@ -993,7 +996,7 @@ int crush_do_rule(const struct crush_map *map,
 
 			/* reset output */
 			osize = 0;
-
+			__u64 colors = 0U;
 			for (i = 0; i < wsize; i++) {
 				int bno;
 				/*
@@ -1024,6 +1027,21 @@ int crush_do_rule(const struct crush_map *map,
 						recurse_tries = 1;
 					else
 						recurse_tries = choose_tries;
+					
+					//printf("Before calling crush_choose_firstn \n");
+					if(i > 0 && map->buckets[bno]->items[0] >= 0){
+						//printf(" output %d ",  w[i - 1] );
+						int zz2 = 0;
+						int begin = osize - numrep * i;
+						int end = begin + numrep;
+						//printf("begin %d and end %d \n ", begin, end);
+						for(zz2 = begin ; zz2 < end; zz2++){
+							int color = get_color(map->buckets[-1- w[i-1]] , o[zz2]);
+							colors |= 1U << color; 	
+						}
+						
+					}
+					//printf("******* color bits %d \n ", colors);
 					osize += crush_choose_firstn(
 						map,
 						cw,
@@ -1041,7 +1059,7 @@ int crush_do_rule(const struct crush_map *map,
 						vary_r,
 						stable,
 						c+osize,
-						0);
+						0, colors);
 				} else {
 					out_size = ((numrep < (result_max-osize)) ?
 						    numrep : (result_max-osize));
@@ -1091,4 +1109,11 @@ int crush_do_rule(const struct crush_map *map,
 	}
 
 	return result_len;
+}
+
+int get_color(struct crush_bucket *bucket, int item){
+	struct crush_item_color *item_color_map = bucket -> item_color_map;
+ 	struct crush_item_color *s;
+ 	HASH_FIND_INT(item_color_map, &item, s );  /* s: output pointer */
+ 	return s->color;	
 }

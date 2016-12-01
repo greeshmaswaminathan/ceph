@@ -17,11 +17,12 @@ extern int crush_add_bucket(struct crush_map *map,
 			    int bucketno,
 			    struct crush_bucket *bucket, int *idout);
 struct crush_bucket *crush_make_bucket(struct crush_map *map, int alg, int hash, int type, int size, int *items, int *weights);
-extern int crush_bucket_add_item(struct crush_map *map, struct crush_bucket *bucket, int item, int weight);
+extern int crush_bucket_add_item(struct crush_map *map, struct crush_bucket *bucket, int item, int weight); 
 extern int crush_bucket_adjust_item_weight(struct crush_map *map, struct crush_bucket *bucket, int item, int weight);
 extern int crush_reweight_bucket(struct crush_map *crush, struct crush_bucket *bucket);
 extern int crush_remove_bucket(struct crush_map *map, struct crush_bucket *bucket);
 extern int crush_bucket_remove_item(struct crush_map *map, struct crush_bucket *bucket, int item);
+extern int crush_bucket_map_colors(struct crush_bucket *bucket, int *items, int *colors);
 
 struct crush_bucket_uniform *
 crush_make_uniform_bucket(int hash, int type, int size,

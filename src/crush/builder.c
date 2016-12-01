@@ -10,6 +10,7 @@
 
 #include "builder.h"
 #include "hash.h"
+#include "uthash.h"
 
 #define dprintk(args...) /* printf(args) */
 
@@ -1422,4 +1423,20 @@ int crush_multiplication_is_unsafe(__u32  a, __u32 b)
 		return 1;
 	else
 		return 0;
+}
+
+int crush_bucket_map_colors(struct crush_bucket *bucket, int *items, int *colors){
+	struct crush_item_color* item_color_map = NULL;
+	int i = 0;
+	for(i = 0; i < bucket -> size; i++)
+	{
+		struct crush_item_color *s;
+		s = malloc(sizeof(struct crush_item_color));
+		s -> item = items[i];
+		s -> color = colors[i];
+		HASH_ADD_INT( item_color_map, item , s );
+	}
+	bucket -> item_color_map = item_color_map;
+	printf("Completed mapping colors ");
+	return 0;
 }
