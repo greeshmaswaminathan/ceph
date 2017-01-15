@@ -187,7 +187,6 @@ static void reloader_handler(int signum)
   sighup_handler(signum);
 }
 
-
 /*
  * start up the RADOS connection and then handle HTTP messages as they come in
  */
@@ -282,6 +281,11 @@ int main(int argc, const char **argv)
     if (g_conf->rgw_realm_root_pool.empty()) {
       g_conf->set_val_or_die("rgw_realm_root_pool", root_pool);
     }
+  }
+
+  // for region -> zonegroup conversion (must happen before common_init_finish())
+  if (!g_conf->rgw_region.empty() && g_conf->rgw_zonegroup.empty()) {
+    g_conf->set_val_or_die("rgw_zonegroup", g_conf->rgw_region.c_str());
   }
 
   check_curl();
@@ -416,6 +420,9 @@ int main(int argc, const char **argv)
     rest.register_resource(g_conf->rgw_admin_entry, admin_resource);
   }
 
+  /* Header custom behavior */
+  rest.register_x_headers(g_conf->rgw_log_http_headers);
+
   OpsLogSocket *olog = NULL;
 
   if (!g_conf->rgw_ops_log_socket_path.empty()) {
@@ -462,12 +469,10 @@ int main(int argc, const char **argv)
 
       fe = new RGWFCGXFrontend(fcgi_pe, config);
     } else if (framework == "civetweb" || framework == "mongoose") {
-      int port;
-      config->get_val("port", 80, &port);
       std::string uri_prefix;
       config->get_val("prefix", "", &uri_prefix);
 
-      RGWProcessEnv env = { store, &rest, olog, port, uri_prefix };
+      RGWProcessEnv env = { store, &rest, olog, 0, uri_prefix };
 
       fe = new RGWCivetWebFrontend(env, config);
     } else if (framework == "loadgen") {

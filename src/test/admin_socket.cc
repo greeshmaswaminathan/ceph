@@ -17,7 +17,7 @@
 #include "common/admin_socket.h"
 #include "common/admin_socket_client.h"
 #include "common/ceph_argparse.h"
-#include "test/unit.h"
+#include "gtest/gtest.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -102,6 +102,20 @@ TEST(AdminSocket, SendNoOp) {
   string version;
   ASSERT_EQ("", client.do_request("{\"prefix\":\"0\"}", &version));
   ASSERT_EQ(CEPH_ADMIN_SOCK_VERSION, version);
+  ASSERT_EQ(true, asoct.shutdown());
+}
+
+TEST(AdminSocket, SendTooLongRequest) {
+  std::unique_ptr<AdminSocket>
+      asokc(new AdminSocket(g_ceph_context));
+  AdminSocketTest asoct(asokc.get());
+  ASSERT_EQ(true, asoct.shutdown());
+  ASSERT_EQ(true, asoct.init(get_rand_socket_path()));
+  AdminSocketClient client(get_rand_socket_path());
+  string version;
+  string request(16384, 'a');
+  //if admin_socket cannot handle it, segfault will happened.
+  ASSERT_NE("", client.do_request(request, &version));
   ASSERT_EQ(true, asoct.shutdown());
 }
 

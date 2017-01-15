@@ -23,6 +23,8 @@
 
 #include "include/assert.h" // fio.h clobbers our assert.h
 
+#define dout_context g_ceph_context
+
 namespace {
 
 /// fio configuration options read from the job file
@@ -103,7 +105,7 @@ Engine::Engine(const thread_data* td) : ref_count(0)
   }
 
   // claim the g_ceph_context reference and release it on destruction
-  auto cct = global_init(nullptr, args, CEPH_ENTITY_TYPE_OSD,
+  cct = global_init(nullptr, args, CEPH_ENTITY_TYPE_OSD,
 			 CODE_ENVIRONMENT_UTILITY, 0);
   common_init_finish(g_ceph_context);
 

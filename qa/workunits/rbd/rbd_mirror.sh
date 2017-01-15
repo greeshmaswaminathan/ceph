@@ -7,12 +7,7 @@
 # socket, temporary files, and launches rbd-mirror daemon.
 #
 
-if [ -n "${CEPH_REF}" ]; then
-  wget -O rbd_mirror_helpers.sh "https://git.ceph.com/?p=ceph.git;a=blob_plain;hb=$CEPH_REF;f=qa/workunits/rbd/rbd_mirror_helpers.sh"
-  . ./rbd_mirror_helpers.sh
-else
-  . $(dirname $0)/rbd_mirror_helpers.sh
-fi
+. $(dirname $0)/rbd_mirror_helpers.sh
 
 testlog "TEST: add image and test replay"
 start_mirror ${CLUSTER1}
@@ -228,8 +223,6 @@ unprotect_snapshot ${CLUSTER2} ${POOL} ${image5} 'snap2'
 for i in ${image3} ${image5}; do
   remove_snapshot ${CLUSTER2} ${POOL} ${i} 'snap1'
   remove_snapshot ${CLUSTER2} ${POOL} ${i} 'snap2'
-  # workaround #16555: before removing make sure it is not still bootstrapped
-  wait_for_image_replay_started ${CLUSTER1} ${POOL} ${i}
   remove_image_retry ${CLUSTER2} ${POOL} ${i}
 done
 
@@ -267,8 +260,8 @@ wait_for_image_present ${CLUSTER1} ${POOL} ${image} 'present'
 wait_for_image_replay_started ${CLUSTER1} ${POOL} ${image}
 
 testlog "TEST: simple image resync"
-request_resync_image ${CLUSTER1} ${POOL} ${image}
-wait_for_image_present ${CLUSTER1} ${POOL} ${image} 'deleted'
+request_resync_image ${CLUSTER1} ${POOL} ${image} image_id
+wait_for_image_present ${CLUSTER1} ${POOL} ${image} 'deleted' ${image_id}
 wait_for_image_replay_started ${CLUSTER1} ${POOL} ${image}
 wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+replaying' 'master_position'
 compare_images ${POOL} ${image}
@@ -276,9 +269,9 @@ compare_images ${POOL} ${image}
 testlog "TEST: image resync while replayer is stopped"
 admin_daemon ${CLUSTER1} rbd mirror stop ${POOL}/${image}
 wait_for_image_replay_stopped ${CLUSTER1} ${POOL} ${image}
-request_resync_image ${CLUSTER1} ${POOL} ${image}
+request_resync_image ${CLUSTER1} ${POOL} ${image} image_id
 admin_daemon ${CLUSTER1} rbd mirror start ${POOL}/${image}
-wait_for_image_present ${CLUSTER1} ${POOL} ${image} 'deleted'
+wait_for_image_present ${CLUSTER1} ${POOL} ${image} 'deleted' ${image_id}
 admin_daemon ${CLUSTER1} rbd mirror start ${POOL}/${image}
 wait_for_image_replay_started ${CLUSTER1} ${POOL} ${image}
 wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+replaying' 'master_position'
@@ -286,7 +279,7 @@ compare_images ${POOL} ${image}
 
 testlog "TEST: request image resync while daemon is offline"
 stop_mirror ${CLUSTER1}
-request_resync_image ${CLUSTER1} ${POOL} ${image}
+request_resync_image ${CLUSTER1} ${POOL} ${image} image_id
 start_mirror ${CLUSTER1}
 wait_for_image_replay_started ${CLUSTER1} ${POOL} ${image}
 wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+replaying' 'master_position'
@@ -307,8 +300,8 @@ wait_for_image_replay_stopped ${CLUSTER1} ${POOL} ${image}
 wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+error' 'disconnected'
 
 testlog " - replay started after resync requested"
-request_resync_image ${CLUSTER1} ${POOL} ${image}
-wait_for_image_present ${CLUSTER1} ${POOL} ${image} 'deleted'
+request_resync_image ${CLUSTER1} ${POOL} ${image} image_id
+wait_for_image_present ${CLUSTER1} ${POOL} ${image} 'deleted' ${image_id}
 wait_for_image_replay_started ${CLUSTER1} ${POOL} ${image}
 wait_for_replay_complete ${CLUSTER1} ${CLUSTER2} ${POOL} ${image}
 test -n "$(get_mirror_position ${CLUSTER2} ${POOL} ${image})"
@@ -332,8 +325,8 @@ wait_for_image_replay_stopped ${CLUSTER1} ${POOL} ${image}
 wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+error' 'disconnected'
 
 testlog " - replay started after resync requested"
-request_resync_image ${CLUSTER1} ${POOL} ${image}
-wait_for_image_present ${CLUSTER1} ${POOL} ${image} 'deleted'
+request_resync_image ${CLUSTER1} ${POOL} ${image} image_id
+wait_for_image_present ${CLUSTER1} ${POOL} ${image} 'deleted' ${image_id}
 wait_for_image_replay_started ${CLUSTER1} ${POOL} ${image}
 wait_for_replay_complete ${CLUSTER1} ${CLUSTER2} ${POOL} ${image}
 test -n "$(get_mirror_position ${CLUSTER2} ${POOL} ${image})"
@@ -356,5 +349,19 @@ disconnect_image ${CLUSTER2} ${POOL} ${image}
 test -z "$(get_mirror_position ${CLUSTER2} ${POOL} ${image})"
 wait_for_image_replay_stopped ${CLUSTER1} ${POOL} ${image}
 wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+error' 'disconnected'
+
+testlog "TEST: split-brain"
+image=split-brain
+create_image ${CLUSTER2} ${POOL} ${image}
+wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+replaying' 'master_position'
+demote_image ${CLUSTER2} ${POOL} ${image}
+wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+stopped'
+promote_image ${CLUSTER1} ${POOL} ${image}
+write_image ${CLUSTER1} ${POOL} ${image} 10
+demote_image ${CLUSTER1} ${POOL} ${image}
+promote_image ${CLUSTER2} ${POOL} ${image}
+wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+error' 'split-brain'
+request_resync_image ${CLUSTER1} ${POOL} ${image} image_id
+wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${image} 'up+replaying' 'master_position'
 
 echo OK

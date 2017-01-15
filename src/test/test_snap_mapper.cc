@@ -9,7 +9,6 @@
 #include "include/buffer.h"
 #include "common/map_cacher.hpp"
 #include "osd/SnapMapper.h"
-#include "test/unit.h"
 
 #include "gtest/gtest.h"
 
@@ -452,7 +451,7 @@ public:
     uint32_t mask,
     uint32_t bits)
     : driver(driver),
-      mapper(new SnapMapper(driver, mask, bits, 0, shard_id_t(1))),
+      mapper(new SnapMapper(g_ceph_context, driver, mask, bits, 0, shard_id_t(1))),
              mask(mask), bits(bits),
       lock("lock") {}
 

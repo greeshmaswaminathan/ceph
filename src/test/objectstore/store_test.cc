@@ -5066,7 +5066,6 @@ TEST_P(StoreTest, Rename) {
     ObjectStore::Transaction t;
     t.remove(cid, dstoid);
     t.collection_move_rename(cid, srcoid, cid, dstoid);
-    t.setattr(cid, srcoid, "attr", a);  // note: this is a no-op
     r = apply_transaction(store, &osr, std::move(t));
     ASSERT_EQ(r, 0);
   }
@@ -5559,6 +5558,100 @@ TEST_P(StoreTest, TooManyBlobsTest) {
   doMany4KWritesTest(store, 1, 1000, max_object, 4*1024, 0, &res_stat);
   ASSERT_LE(res_stat.stored, max_object);
   ASSERT_EQ(res_stat.allocated, max_object);
+}
+
+void get_mempool_stats(uint64_t* total_bytes, uint64_t* total_items)
+{
+  uint64_t onode_allocated = mempool::bluestore_meta_onode::allocated_bytes();
+  uint64_t other_allocated = mempool::bluestore_meta_other::allocated_bytes();
+
+  uint64_t onode_items = mempool::bluestore_meta_onode::allocated_items();
+  uint64_t other_items = mempool::bluestore_meta_other::allocated_items();
+  cout << "onode(" << onode_allocated << "/" << onode_items
+       << ") other(" << other_allocated << "/" << other_items
+       << ")" << std::endl;
+  *total_bytes = onode_allocated + other_allocated;
+  *total_items = onode_items;
+}
+
+TEST_P(StoreTest, OnodeSizeTracking) {
+
+  if (string(GetParam()) != "bluestore")
+    return;
+
+  size_t block_size = 4096;
+  g_conf->set_val("bluestore_compression_mode", "none");
+  g_conf->set_val("bluestore_csum_type", "none");
+  g_conf->set_val("bluestore_min_alloc_size", stringify(block_size));
+  g_ceph_context->_conf->apply_changes(NULL);
+  int r = store->umount();
+  ASSERT_EQ(r, 0);
+  r = store->mount(); //to force min_alloc_size update
+  ASSERT_EQ(r, 0);
+
+  ObjectStore::Sequencer osr("test");
+  coll_t cid;
+  ghobject_t hoid(hobject_t("test_hint", "", CEPH_NOSNAP, 0, -1, ""));
+  size_t obj_size = 4 * 1024  * 1024;
+  uint64_t total_bytes, total_bytes2;
+  uint64_t total_onodes;
+  get_mempool_stats(&total_bytes, &total_onodes);
+  ASSERT_EQ(total_onodes, 0u);
+
+  {
+    ObjectStore::Transaction t;
+    t.create_collection(cid, 0);
+    r = apply_transaction(store, &osr, std::move(t));
+    ASSERT_EQ(r, 0);
+  }
+  {
+    ObjectStore::Transaction t;
+    bufferlist bl, orig, orig2;
+    
+    bl.append(std::string(obj_size, 'a'));
+    t.write(cid, hoid, 0, bl.length(), bl);
+    r = apply_transaction(store, &osr, std::move(t));
+    ASSERT_EQ(r, 0);
+  }
+  get_mempool_stats(&total_bytes, &total_onodes);
+  ASSERT_NE(total_bytes, 0u);
+  ASSERT_EQ(total_onodes, 1u);
+
+  for(size_t i = 0; i < 1; ++i) {
+    bufferlist bl;
+    bl.append(std::string(block_size * (i+1), 'a'));
+    for( size_t j = 0; j < obj_size; j+= bl.length()) {
+      ObjectStore::Transaction t;
+      t.write(cid, hoid, j, bl.length(), bl);
+      r = apply_transaction(store, &osr, std::move(t));
+      ASSERT_EQ(r, 0);
+    }
+    get_mempool_stats(&total_bytes2, &total_onodes);
+    ASSERT_NE(total_bytes2, 0u);
+    ASSERT_EQ(total_onodes, 1u);
+  }
+  {
+    cout <<" mempool dump:\n";
+    JSONFormatter f(true);
+    f.open_object_section("transaction");
+    mempool::dump(&f);
+    f.close_section();
+    f.flush(cout);
+    cout << std::endl;
+  }
+
+  {
+    ObjectStore::Transaction t;
+    t.remove(cid, hoid);
+    t.remove_collection(cid);
+    cerr << "Cleaning" << std::endl;
+    r = apply_transaction(store, &osr, std::move(t));
+    ASSERT_EQ(r, 0);
+  }
+  g_conf->set_val("bluestore_min_alloc_size", stringify(block_size));
+  g_conf->set_val("bluestore_compression_mode", "none");
+  g_conf->set_val("bluestore_csum_type", "crc32c");
+
 }
 
 int main(int argc, char **argv) {

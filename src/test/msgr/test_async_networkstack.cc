@@ -28,7 +28,6 @@
 
 #include "msg/async/Event.h"
 #include "msg/async/Stack.h"
-#include "test/unit.h"
 
 
 #if GTEST_HAS_PARAM_TEST
@@ -125,12 +124,12 @@ class C_poll : public EventCallback {
     woken = true;
   }
   bool poll(int milliseconds) {
-    auto start = ceph::coarse_real_clock::now(g_ceph_context);
+    auto start = ceph::coarse_real_clock::now();
     while (!woken) {
       center->process_events(sleepus);
       usleep(sleepus);
       auto r = std::chrono::duration_cast<std::chrono::milliseconds>(
-              ceph::coarse_real_clock::now(g_ceph_context) - start);
+              ceph::coarse_real_clock::now() - start);
       if (r >= std::chrono::milliseconds(milliseconds))
         break;
     }

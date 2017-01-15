@@ -20,6 +20,8 @@
 #include "common/errno.h"
 #include "store_test_fixture.h"
 
+#define dout_context g_ceph_context
+
 namespace {
 
 const coll_t cid;
@@ -178,7 +180,7 @@ int main(int argc, char** argv)
   // default to memstore
   vector<const char*> defaults{
     "--osd_objectstore", "memstore",
-    "--osd_data", "memstore.test_temp_dir",
+    "--osd_data", "msc.test_temp_dir",
     "--memstore_page_size", "4",
   };
 

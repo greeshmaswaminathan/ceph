@@ -278,7 +278,7 @@ int main(int argc, const char **argv)
 
   if (!export_crush.empty()) {
     bufferlist cbl;
-    osdmap.crush->encode(cbl);
+    osdmap.crush->encode(cbl, CEPH_FEATURES_SUPPORTED_DEFAULT);
     r = cbl.write_file(export_crush.c_str());
     if (r < 0) {
       cerr << me << ": error writing crush map to " << import_crush << std::endl;
@@ -407,7 +407,7 @@ int main(int argc, const char **argv)
 	max_osd = i;
 
     }
-    uint64_t avg = total / in;
+    uint64_t avg = in ? (total / in) : 0;
     double dev = 0;
     for (int i=0; i<n; i++) {
       if (!osdmap.is_in(i))

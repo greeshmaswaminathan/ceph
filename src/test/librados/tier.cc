@@ -14,7 +14,6 @@
 #include "test/librados/test.h"
 #include "test/librados/TestCase.h"
 #include "json_spirit/json_spirit.h"
-#include "test/unit.h"
 
 #include "osd/HitSet.h"
 
@@ -114,6 +113,28 @@ protected:
   }
   librados::IoCtx cache_ioctx;
 };
+
+class Completions
+{
+public:
+  Completions() = default;
+  librados::AioCompletion* getCompletion() {
+    librados::AioCompletion* comp = librados::Rados::aio_create_completion();
+    m_completions.push_back(comp);
+    return comp;
+  }
+
+  ~Completions() {
+    for (auto& comp : m_completions) {
+      comp->release();
+    }
+  }
+
+private:
+  vector<librados::AioCompletion *> m_completions;
+};
+
+Completions completions;
 
 std::string LibRadosTwoPoolsPP::cache_pool_name;
 
@@ -2023,8 +2044,7 @@ void start_flush_read()
   //cout << " starting read" << std::endl;
   ObjectReadOperation op;
   op.stat(NULL, NULL, NULL);
-  librados::AioCompletion *completion =
-    librados::Rados::aio_create_completion();
+  librados::AioCompletion *completion = completions.getCompletion();
   completion->set_complete_callback(0, flush_read_race_cb);
   read_ioctx->aio_operate("foo", completion, &op, NULL);
 }
@@ -2039,7 +2059,6 @@ void flush_read_race_cb(completion_t cb, void *arg)
   } else {
     start_flush_read();
   }
-  // fixme: i'm leaking cb...
   test_lock.Unlock();
 }
 
@@ -2163,11 +2182,11 @@ TEST_F(LibRadosTwoPoolsPP, HitSetRead) {
   cache_ioctx.set_namespace("");
 
   // keep reading until we see our object appear in the HitSet
-  utime_t start = ceph_clock_now(NULL);
+  utime_t start = ceph_clock_now();
   utime_t hard_stop = start + utime_t(600, 0);
 
   while (true) {
-    utime_t now = ceph_clock_now(NULL);
+    utime_t now = ceph_clock_now();
     ASSERT_TRUE(now < hard_stop);
 
     string name = "foo";
@@ -2346,7 +2365,7 @@ TEST_F(LibRadosTwoPoolsPP, HitSetTrim) {
   cache_ioctx.set_namespace("");
 
   // do a bunch of writes and make sure the hitsets rotate
-  utime_t start = ceph_clock_now(NULL);
+  utime_t start = ceph_clock_now();
   utime_t hard_stop = start + utime_t(count * period * 50, 0);
 
   time_t first = 0;
@@ -2379,7 +2398,7 @@ TEST_F(LibRadosTwoPoolsPP, HitSetTrim) {
       }
     }
 
-    utime_t now = ceph_clock_now(NULL);
+    utime_t now = ceph_clock_now();
     ASSERT_TRUE(now < hard_stop);
 
     sleep(1);
@@ -4829,11 +4848,11 @@ TEST_F(LibRadosTwoPoolsECPP, HitSetRead) {
   cache_ioctx.set_namespace("");
 
   // keep reading until we see our object appear in the HitSet
-  utime_t start = ceph_clock_now(NULL);
+  utime_t start = ceph_clock_now();
   utime_t hard_stop = start + utime_t(600, 0);
 
   while (true) {
-    utime_t now = ceph_clock_now(NULL);
+    utime_t now = ceph_clock_now();
     ASSERT_TRUE(now < hard_stop);
 
     string name = "foo";
@@ -4972,7 +4991,7 @@ TEST_F(LibRadosTwoPoolsECPP, HitSetTrim) {
   cache_ioctx.set_namespace("");
 
   // do a bunch of writes and make sure the hitsets rotate
-  utime_t start = ceph_clock_now(NULL);
+  utime_t start = ceph_clock_now();
   utime_t hard_stop = start + utime_t(count * period * 50, 0);
 
   time_t first = 0;
@@ -5009,7 +5028,7 @@ TEST_F(LibRadosTwoPoolsECPP, HitSetTrim) {
       }
     }
 
-    utime_t now = ceph_clock_now(NULL);
+    utime_t now = ceph_clock_now();
     ASSERT_TRUE(now < hard_stop);
 
     sleep(1);

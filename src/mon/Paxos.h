@@ -122,7 +122,6 @@ e 12v
 
 class Monitor;
 class MMonPaxos;
-class Paxos;
 
 enum {
   l_paxos_first = 45800,
@@ -658,8 +657,8 @@ public:
     C_Proposal(Context *c, bufferlist& proposal_bl) :
 	proposer_context(c),
 	bl(proposal_bl),
-        proposed(false),
-	proposal_time(ceph_clock_now(NULL))
+	proposed(false),
+	proposal_time(ceph_clock_now())
       { }
 
     void finish(int r) {
@@ -1142,7 +1141,7 @@ public:
    */
   static void decode_append_transaction(MonitorDBStore::TransactionRef t,
 					bufferlist& bl) {
-    MonitorDBStore::TransactionRef vt(new MonitorDBStore::Transaction);
+    auto vt(std::make_shared<MonitorDBStore::Transaction>());
     bufferlist::iterator it = bl.begin();
     vt->decode(it);
     t->append(vt);
@@ -1358,9 +1357,9 @@ inline ostream& operator<<(ostream& out, Paxos::C_Proposal& p)
 {
   string proposed = (p.proposed ? "proposed" : "unproposed");
   out << " " << proposed
-      << " queued " << (ceph_clock_now(NULL) - p.proposal_time)
+      << " queued " << (ceph_clock_now() - p.proposal_time)
       << " tx dump:\n";
-  MonitorDBStore::TransactionRef t(new MonitorDBStore::Transaction);
+  auto t(std::make_shared<MonitorDBStore::Transaction>());
   bufferlist::iterator p_it = p.bl.begin();
   t->decode(p_it);
   JSONFormatter f(true);

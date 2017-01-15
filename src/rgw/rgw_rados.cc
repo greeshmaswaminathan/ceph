@@ -1,4 +1,3 @@
-
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 
@@ -73,6 +72,7 @@ using namespace librados;
 
 #include "compressor/Compressor.h"
 
+#define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
 
 using namespace std;
@@ -1654,6 +1654,17 @@ int RGWZoneParams::set_as_default(bool exclusive)
   return RGWSystemMetaObj::set_as_default(exclusive);
 }
 
+const string& RGWZoneParams::get_compression_type(const string& placement_rule) const
+{
+  static const std::string NONE{"none"};
+  auto p = placement_pools.find(placement_rule);
+  if (p == placement_pools.end()) {
+    return NONE;
+  }
+  const auto& type = p->second.compression_type;
+  return !type.empty() ? type : NONE;
+}
+
 void RGWPeriodMap::encode(bufferlist& bl) const {
   ENCODE_START(2, 1, bl);
   ::encode(id, bl);
@@ -2845,7 +2856,7 @@ void *RGWRadosThread::Worker::entry() {
   utime_t interval = utime_t(msec / 1000, (msec % 1000) * 1000000);
 
   do {
-    utime_t start = ceph_clock_now(cct);
+    utime_t start = ceph_clock_now();
     int r = processor->process();
     if (r < 0) {
       dout(0) << "ERROR: processor->process() returned error r=" << r << dendl;
@@ -2854,7 +2865,7 @@ void *RGWRadosThread::Worker::entry() {
     if (processor->going_down())
       break;
 
-    utime_t end = ceph_clock_now(cct);
+    utime_t end = ceph_clock_now();
     end -= start;
 
     uint64_t cur_msec = processor->interval_msec();
@@ -2871,7 +2882,7 @@ void *RGWRadosThread::Worker::entry() {
       wait_time -= end;
 
       lock.Lock();
-      cond.WaitInterval(cct, lock, wait_time);
+      cond.WaitInterval(lock, wait_time);
       lock.Unlock();
     } else {
       lock.Lock();
@@ -3057,7 +3068,8 @@ class RGWSyncLogTrimThread : public RGWSyncProcessorThread
   void stop_process() override { crs.stop(); }
 public:
   RGWSyncLogTrimThread(RGWRados *store, int interval)
-    : RGWSyncProcessorThread(store), crs(store->ctx(), nullptr), store(store),
+    : RGWSyncProcessorThread(store),
+      crs(store->ctx(), store->get_cr_registry()), store(store),
       http(store->ctx(), crs.get_completion_mgr()),
       trim_interval(interval, 0)
   {}
@@ -3066,9 +3078,9 @@ public:
     return http.set_threaded();
   }
   int process() override {
-    crs.run(new RGWDataLogTrimCR(store, &http,
-                                 cct->_conf->rgw_data_log_num_shards,
-                                 trim_interval));
+    crs.run(create_data_log_trim_cr(store, &http,
+                                    cct->_conf->rgw_data_log_num_shards,
+                                    trim_interval));
     return 0;
   }
 };
@@ -3399,14 +3411,6 @@ int RGWRados::convert_regionmap()
  */
 int RGWRados::replace_region_with_zonegroup()
 {
-  if (!cct->_conf->rgw_region.empty() && cct->_conf->rgw_zonegroup.empty()) {
-    int ret = cct->_conf->set_val("rgw_zonegroup", cct->_conf->rgw_region, true, false);
-    if (ret < 0) {
-      ldout(cct, 0) << "failed to set rgw_zonegroup to " << cct->_conf->rgw_region << dendl;
-      return ret;
-    }
-  }
-
   /* copy default region */
   /* convert default region to default zonegroup */
   string default_oid = cct->_conf->rgw_default_region_info_oid;
@@ -5357,7 +5361,7 @@ int RGWRados::create_bucket(RGWUserInfo& owner, rgw_bucket& bucket,
     info.bucket_index_shard_hash_type = RGWBucketInfo::MOD;
     info.requester_pays = false;
     if (real_clock::is_zero(creation_time)) {
-      info.creation_time = ceph::real_clock::now(cct);
+      info.creation_time = ceph::real_clock::now();
     } else {
       info.creation_time = creation_time;
     }
@@ -7103,11 +7107,12 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& obj_ctx,
 
   RGWPutObjDataProcessor *filter = &processor;
 
-  const auto& compression_type = cct->_conf->rgw_compression_type;
+  const auto& compression_type = zone_params.get_compression_type(
+      dest_bucket_info.placement_rule);
   if (compression_type != "none") {
     plugin = Compressor::create(cct, compression_type);
     if (!plugin) {
-      ldout(cct, 1) << "Cannot load plugin for rgw_compression_type "
+      ldout(cct, 1) << "Cannot load plugin for compression type "
           << compression_type << dendl;
     } else {
       compressor = boost::in_place(cct, plugin, filter);
@@ -9650,7 +9655,12 @@ struct get_obj_data : public RefCountedObject {
   void add_io(off_t ofs, off_t len, bufferlist **pbl, AioCompletion **pc) {
     Mutex::Locker l(lock);
 
-    get_obj_io& io = io_map[ofs];
+    const auto& io_iter = io_map.insert(
+      map<off_t, get_obj_io>::value_type(ofs, get_obj_io()));
+
+    assert(io_iter.second); // assert new insertion
+
+    get_obj_io& io = (io_iter.first)->second;
     *pbl = &io.bl;
 
     struct get_obj_aio_data aio;
@@ -9897,9 +9907,10 @@ int RGWRados::get_obj_iterate_cb(RGWObjectCtx *ctx, RGWObjState *astate,
   io_ctx.locator_set_key(key);
 
   r = io_ctx.aio_operate(oid, c, &op, NULL);
-  ldout(cct, 20) << "rados->aio_operate r=" << r << " bl.length=" << pbl->length() << dendl;
-  if (r < 0)
-    goto done_err;
+  if (r < 0) {
+	ldout(cct, 0) << "rados->aio_operate r=" << r << dendl;
+	goto done_err;
+  }
 
   // Flush data to client if there is any
   r = flush_read_list(d);
@@ -11097,7 +11108,7 @@ int RGWRados::convert_old_bucket_info(RGWObjectCtx& obj_ctx,
 
   int ret = get_bucket_entrypoint_info(obj_ctx, tenant_name, bucket_name, entry_point, &ot, &ep_mtime, &attrs);
   if (ret < 0) {
-    ldout(cct, 0) << "ERROR: get_bucket_entrypont_info() returned " << ret << " bucket=" << bucket_name << dendl;
+    ldout(cct, 0) << "ERROR: get_bucket_entrypoint_info() returned " << ret << " bucket=" << bucket_name << dendl;
     return ret;
   }
 
@@ -11290,11 +11301,33 @@ int RGWRados::omap_get_vals(rgw_obj& obj, bufferlist& header, const string& mark
  
 }
 
-int RGWRados::omap_get_all(rgw_obj& obj, bufferlist& header, std::map<string, bufferlist>& m)
+int RGWRados::omap_get_all(rgw_obj& obj, bufferlist& header,
+			   std::map<string, bufferlist>& m)
 {
+  rgw_rados_ref ref;
+  rgw_bucket bucket;
+  int r = get_obj_ref(obj, &ref, &bucket);
+  if (r < 0) {
+    return r;
+  }
+
+#define MAX_OMAP_GET_ENTRIES 1024
+  const int count = MAX_OMAP_GET_ENTRIES;
   string start_after;
 
-  return omap_get_vals(obj, header, start_after, (uint64_t)-1, m);
+  while (true) {
+    std::map<string, bufferlist> t;
+    r = ref.ioctx.omap_get_vals(ref.oid, start_after, count, &t);
+    if (r < 0) {
+      return r;
+    }
+    if (t.empty()) {
+      break;
+    }
+    start_after = t.rbegin()->first;
+    m.insert(t.begin(), t.end());
+  }
+  return 0;
 }
 
 int RGWRados::omap_set(rgw_obj& obj, std::string& key, bufferlist& bl)
@@ -11777,7 +11810,7 @@ int RGWRados::process_lc()
 
 int RGWRados::process_expire_objects()
 {
-  obj_expirer->inspect_all_shards(utime_t(), ceph_clock_now(cct));
+  obj_expirer->inspect_all_shards(utime_t(), ceph_clock_now());
   return 0;
 }
 
@@ -12613,7 +12646,7 @@ int RGWStateLog::store_entry(const string& client_id, const string& op_id, const
   if (check_state) {
     cls_statelog_check_state(op, client_id, op_id, object, *check_state);
   }
-  utime_t ts = ceph_clock_now(store->ctx());
+  utime_t ts = ceph_clock_now();
   bufferlist nobl;
   cls_statelog_add(op, client_id, op_id, object, ts, state, (bl ? *bl : nobl));
   r = ioctx.operate(oid, &op);
