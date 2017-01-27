@@ -400,6 +400,55 @@ static int is_out(const struct crush_map *map,
 	return 1;
 }
 
+
+
+int get_color(struct crush_bucket *bucket, int item){
+        struct crush_item_color *item_color_map = bucket -> item_color_map;
+        struct crush_item_color *s;
+        HASH_FIND_INT(item_color_map, &item, s );  /* s: output pointer */
+        return s->color;
+}
+
+
+struct crush_bucket* filter_bucket_colors(struct crush_bucket *in, struct crush_map *map, __u64 used_colors){
+        /********** Color ************/
+        struct crush_bucket *temp = NULL;
+        int index = 0;
+        if(in->items[0] >= 0) {
+                //printf("Color of item %d is %d ",s->item, s->color);
+                struct crush_map *map1 = map;
+                int t_weights[in->size];
+                for(index = 0; index < in->size; index++){
+                        t_weights[index] = in->weight;
+                }
+                int newSize = 0;
+                int newItems[in->size];
+                for(index = 0; index < in->size; index++){
+                        int item = in->items[index];
+                        int color = get_color(in, item);
+                        //if(item == 15)
+                        //printf("\n &&&&& Color of item %d is %d and verdict %d",item, color, ((1U << color) & used_colors));
+                        if(((1U << color)  & used_colors) == 0){
+                                newItems[newSize] = item;
+                                newSize++;
+                        }
+                }
+                //printf("filtering items to have only mod %d ", out_size - rep - 1);
+                temp = crush_make_bucket(map1, in->alg, in->hash, in->type, newSize, newItems, t_weights);
+                temp->id = in->id;
+
+        }
+        else{
+                //printf("No filtering item[0] is not a device %d ",in->items[0]);
+                temp = in;
+        }
+        return temp;
+}
+
+
+
+
+
 /**
  * crush_choose_firstn - choose numrep distinct items of given type
  * @map: the crush_map
@@ -441,14 +490,12 @@ static int crush_choose_firstn(const struct crush_map *map,
 	unsigned int ftotal, flocal;
 	int retry_descent, retry_bucket, skip_rep;
 	struct crush_bucket *in = bucket;
-	struct crush_bucket *temp = NULL;
 	int r;
 	int i;
 	int item = 0;
 	int itemtype;
 	int collide, reject;
 	int count = out_size;
-        int index = 0;        
 
 	dprintk("CHOOSE%s bucket %d x %d outpos %d numrep %d tries %d \
 recurse_tries %d local_retries %d local_fallback_retries %d \
@@ -479,34 +526,7 @@ parent_r %d stable %d\n",
 					goto reject;
 				}
 				/********** Color ************/
-				if(in->items[0] >= 0) {
-    					//printf("Color of item %d is %d ",s->item, s->color);
-   	                     		struct crush_map *map1 = map;
-                        		int t_weights[in->size];
-                        		for(index = 0; index < in->size; index++){
-                                		t_weights[index] = in->weight;
-                        		}	
-                        		int newSize = 0;
-                        		int newItems[in->size];
-                        		for(index = 0; index < in->size; index++){
-                                		int item = in->items[index];
-						int color = get_color(in, item);
-						//if(item == 15)
-						//printf("\n &&&&& Color of item %d is %d and verdict %d",item, color, ((1U << color) & used_colors));
-                                		if(((1U << color)  & used_colors) == 0){
-                                        		newItems[newSize] = item;
-                                        		newSize++;
-                                		}
-                        		}		
-					//printf("filtering items to have only mod %d ", out_size - rep - 1);
-                        		temp = crush_make_bucket(map1, in->alg, in->hash, in->type, newSize, newItems, t_weights);
-                        		temp->id = in->id;
-                        	
-                        		
-                		}else{
-					//printf("No filtering item[0] is not a device %d ",in->items[0]);
-					temp = in;
-				}
+				struct crush_bucket *temp = filter_bucket_colors(in, map, used_colors);
 				if (local_fallback_retries > 0 &&
 				    flocal >= (in->size>>1) &&
 				    flocal > local_fallback_retries)
@@ -1028,7 +1048,7 @@ int crush_do_rule(const struct crush_map *map,
 					else
 						recurse_tries = choose_tries;
 					
-					//printf("Before calling crush_choose_firstn \n");
+					//find used colors
 					if(i > 0 && map->buckets[bno]->items[0] >= 0){
 						//printf(" output %d ",  w[i - 1] );
 						int zz2 = 0;
@@ -1111,9 +1131,3 @@ int crush_do_rule(const struct crush_map *map,
 	return result_len;
 }
 
-int get_color(struct crush_bucket *bucket, int item){
-	struct crush_item_color *item_color_map = bucket -> item_color_map;
- 	struct crush_item_color *s;
- 	HASH_FIND_INT(item_color_map, &item, s );  /* s: output pointer */
- 	return s->color;	
-}
